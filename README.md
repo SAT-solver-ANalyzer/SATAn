@@ -49,8 +49,8 @@ tests:
   cadical-tests:
     # references git submodule for cadical, may be a relative or absolute path
     path: ./solvers/cadical/test/cnf
-    # timeout for cadical executions in nano seconds
-    timeout: 100
+    # timeout for cadical executions in nano seconds (10000000000 ns = 10 s)
+    timeout: 10000000000
     # Glob for selecting files in path, will match all files ending with .cnf
     glob: "*.cnf"
     # TODO: Document paths and params
