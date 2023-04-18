@@ -24,7 +24,12 @@ Developed by Cobalt.
 > - The datastore for metrics may be one of DuckDB, (maybe) Clickhouse or maybe something else that fits the data structure.
 > - The executor is part of the runner and only one executor maybe active for one runner.
 
-![]()
+<center>
+
+![Diagram](https://outline.cobalt.rocks/api/attachments.redirect?id=4f654f9b-91de-4f28-afab-939e5b92d6fb)
+
+</center>
+
 
 ## Logo attribution
 
