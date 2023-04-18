@@ -33,6 +33,7 @@ pub struct ExecutorConfig {
     // Name of the selected executor, see Executors::from_str for the selection proccess
     pub name: String,
     // parameters for the executor that apply over all tests
+    // TODO: Make this fully typed with an enum
     pub parameter: Option<BTreeMap<String, serde_yaml::Value>>,
 }
 
@@ -56,6 +57,7 @@ pub struct Solver {
     pub exec: PathBuf,
     #[serde(default)]
     pub params: Vec<String>,
+    pub ingest: String,
 }
 
 impl SolverConfig {

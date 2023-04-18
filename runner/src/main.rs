@@ -1,16 +1,17 @@
 mod config;
 mod executors;
-use crate::executors::Executor;
-use std::{fs::File, io::BufReader, process::exit};
+mod ingest;
 
+use crate::executors::Executor;
 use clap::Parser;
+use std::{fs::File, io::BufReader, path::PathBuf, process::exit};
 use tracing::{debug, error, info};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 #[derive(Parser, Debug, Clone)]
 struct Args {
     #[arg(short = 'c', long = "config", value_name = "CONFIG", value_hint = clap::ValueHint::FilePath)]
-    config: std::path::PathBuf,
+    config: PathBuf,
 }
 
 fn main() {

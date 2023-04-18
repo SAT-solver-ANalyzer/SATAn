@@ -1,20 +1,25 @@
 use super::{Executor, ExecutorError};
 use crate::config::SolverConfig;
+use affinity::{get_core_num, set_thread_affinity};
 use ignore::WalkBuilder;
 use itertools::{iproduct, Itertools};
 use rayon::{prelude::*, ThreadPoolBuilder};
 use std::{
     borrow::Cow,
     io::Read,
-    process::Command,
-    process::{exit, Stdio},
-    sync::{atomic::AtomicU64, atomic::Ordering, Arc},
+    process::{exit, Command, Stdio},
+    sync::{
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 use tracing::{debug, error, info, instrument, trace, warn};
 use wait_timeout::ChildExt;
 
-/// Executor that works on a local thread pool
+const ATOMIC_ORDERING: Ordering = Ordering::SeqCst;
+
+/// Executor that works on a local rayon-backed thread pool
 pub struct LocalExecutor {
     config: SolverConfig,
 }
@@ -42,23 +47,54 @@ impl Executor for LocalExecutor {
         };
 
         // setup custom global thread pool
-        let thread_number = if let Some(Some(Some(Ok(number)))) =
-            self.config.executor.parameter.as_ref().map(|parameters| {
-                parameters
-                    .get("threads")
-                    .map(|value| value.as_u64().map(usize::try_from))
-            }) {
-            number
+        let mut builder = ThreadPoolBuilder::new();
+
+        let thread_number = if let Some(Some(threads)) = self
+            .config
+            .executor
+            .parameter
+            .as_ref()
+            .map(|parameters| parameters.get("threads"))
+        {
+            if let Some(Ok(thread_number)) = threads.as_u64().map(usize::try_from) {
+                if thread_number == 0 {
+                    error!("0 threads for thread pool are not possible, falling back to number of CPUs");
+
+                    get_core_num()
+                } else {
+                    thread_number
+                }
+            } else if let Some(threads) = threads.as_str() {
+                let core_num = get_core_num();
+                if threads == "pinned" {
+                    info!("Pinning threads to logical CPUs");
+
+                    // TODO: Add config option for fine grained pinning control, this is a late
+                    // stage feature
+
+                    // cores are spread over all threads, this is done by pinning threads to CPU from high ->
+                    // low with affinity
+                    let free_cores = AtomicUsize::new(core_num - 1);
+                    builder = builder.start_handler(move |thread_handle| {
+                        let selected_core = free_cores.fetch_sub(1, ATOMIC_ORDERING);
+
+                        debug!("Pinning thread-pool thread {thread_handle} to logical CPU {selected_core}");
+                        set_thread_affinity([selected_core]).expect("Failed to pin thread to CPU");
+                    });
+                }
+
+                core_num
+            } else {
+                error!("{threads:?} is not a valid value for executor.params with local executor");
+
+                get_core_num()
+            }
         } else {
-            num_cpus::get()
+            get_core_num()
         };
 
-        debug!("Stating thread pool with {thread_number} threads");
-
-        ThreadPoolBuilder::new()
-            .num_threads(thread_number)
-            .build_global()
-            .unwrap();
+        builder.num_threads(thread_number).build_global().unwrap();
+        debug!("Building thread pool with {thread_number} threads");
 
         // general counters to provide a progress bar
         let total = AtomicU64::new(0);
@@ -97,7 +133,8 @@ impl Executor for LocalExecutor {
                     .map(|path| path.into_path().as_os_str().to_owned())
                     .collect_vec();
 
-                total.fetch_add((paths.len() * set.solvers.len()) as u64, Ordering::SeqCst);
+                // increase total counter for progress bar
+                total.fetch_add((paths.len() * set.solvers.len()) as u64, ATOMIC_ORDERING);
 
                 // create actual tasks for all sets x solvers, including test metadata for
                 // ingesting
@@ -111,11 +148,13 @@ impl Executor for LocalExecutor {
                     file, set.timeout
                 );
 
-                // TODO: Use a thread-safe parallel friendly map below
+                // TODO: Another map may be used here to allow for fast access
+                // For testing this is sufficient though
                 let solver = self.config.solvers.get(&solver_name).unwrap();
-                let one_sec = Duration::from_secs(set.timeout as u64);
+                let timeout = Duration::from_secs(set.timeout as u64);
                 let start = Instant::now();
 
+                // this thread is created after the initial thread and inherits it's CPU affinity
                 match Command::new(&solver.exec)
                     .args(solver.params.iter())
                     .args(set.params.as_ref().unwrap_or(&[].to_vec()))
@@ -124,7 +163,7 @@ impl Executor for LocalExecutor {
                     .stderr(Stdio::piped())
                     .spawn()
                 {
-                    Ok(mut child) => match child.wait_timeout(one_sec).unwrap() {
+                    Ok(mut child) => match child.wait_timeout(timeout).unwrap() {
                         Some(status) => {
                             let elapsed = start.elapsed();
                             let mut stdout = child.stdout.take().unwrap();
@@ -150,12 +189,12 @@ impl Executor for LocalExecutor {
                 };
                 info!(
                     "Done with {}/{}",
-                    processed.fetch_add(1, Ordering::SeqCst) + 1,
-                    total.load(Ordering::SeqCst)
+                    processed.fetch_add(1, ATOMIC_ORDERING) + 1,
+                    total.load(ATOMIC_ORDERING)
                 );
             });
 
-        info!("Done with processing");
+        info!("Done with processing {} items", total.load(ATOMIC_ORDERING));
 
         Ok(())
     }

@@ -15,7 +15,7 @@ tracing-subscriber = { version = "0.3.16", features = ["env-filter"] }
 globset = { version = "0.4", features = ["serde1"] }
 uuid = "1"
 rayon = "1.7.0"
-num_cpus = "1.15.0"
 ignore = "0.4.20"
 itertools = "0.10.5"
 wait-timeout = "0.2.0"
+affinity = "0.1.2"
