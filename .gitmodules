@@ -1,4 +1,8 @@
-[submodule "cadical"]
-	path = cadical
+[submodule "solvers/cadical"]
+	path = solvers/cadical
 	url = https://github.com/arminbiere/cadical.git
+	branch = master
+[submodule "solvers/minisat"]
+	path = solvers/minisat
+	url = https://github.com/niklasso/minisat.git
 	branch = master
