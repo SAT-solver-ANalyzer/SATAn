@@ -40,7 +40,6 @@ pub struct ExecutorConfig {
 #[derive(Deserialize, Serialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct TestSet {
-    #[serde(default)]
     pub timeout: usize,
     #[serde(default)]
     pub paths: Vec<String>,
@@ -157,7 +156,8 @@ impl SolverConfig {
             }
 
             if value.timeout == 0 {
-                warn!("Test {test} is 0, this implies not timeout. This may lead to problems with evaluating some metrics.")
+                error!("Test {test}.timeout cannot 0. This will lead to problems with evaluating some metrics.");
+                contains_error = true;
             }
         }
 

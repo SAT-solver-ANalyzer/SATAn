@@ -151,7 +151,7 @@ impl Executor for LocalExecutor {
                 // TODO: Another map may be used here to allow for fast access
                 // For testing this is sufficient though
                 let solver = self.config.solvers.get(&solver_name).unwrap();
-                let timeout = Duration::from_secs(set.timeout as u64);
+                let timeout = Duration::from_nanos(set.timeout as u64);
                 let start = Instant::now();
 
                 // this thread is created after the initial thread and inherits it's CPU affinity
