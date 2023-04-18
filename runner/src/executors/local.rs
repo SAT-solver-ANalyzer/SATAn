@@ -11,7 +11,7 @@ use std::{
     sync::{atomic::AtomicU64, atomic::Ordering, Arc},
     time::{Duration, Instant},
 };
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, info, instrument, trace, warn};
 use wait_timeout::ChildExt;
 
 /// Executor that works on a local thread pool
@@ -132,10 +132,11 @@ impl Executor for LocalExecutor {
                             stdout.read_to_string(&mut output).expect("Failed to read");
 
                             debug!(
-                                "Finished in {} ns | status: {} | output: {output}",
+                                "Finished in {} ns | status: {}",
                                 elapsed.as_nanos(),
-                                status.success(),
+                                status.success()
                             );
+                            trace!("Output: {output}");
                             // TODO: Here is the part where ingest needs to be attached
                         }
                         None => {
