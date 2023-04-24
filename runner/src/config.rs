@@ -1,10 +1,29 @@
+use crate::{
+    database::Connection,
+    executors::ExecutorError,
+    ingest::{IngestorMap, Ingestors},
+};
 use globset::{GlobBuilder, GlobMatcher};
+use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, fs::File, os::unix::prelude::MetadataExt, path::PathBuf};
+use std::{
+    collections::BTreeMap, fs::File, io::Error, os::unix::fs::MetadataExt, path::PathBuf,
+    str::FromStr,
+};
 use thiserror::Error;
 use tracing::{error, warn};
 
-use crate::executors::ExecutorError;
+// check if a file is executable
+pub fn check_executable(path: &PathBuf) -> Result<bool, ConfigErrors> {
+    if !path.is_file() {
+        Err(ConfigErrors::FileNotFound)
+    } else {
+        match File::open(path).map(|file| file.metadata()) {
+            Ok(Ok(metadata)) => Ok((metadata.mode() & 0o111) != 0),
+            Ok(Err(e)) | Err(e) => Err(ConfigErrors::MetadataNotFound(e)),
+        }
+    }
+}
 
 #[derive(Error, Debug)]
 pub enum ConfigErrors {
@@ -14,6 +33,14 @@ pub enum ConfigErrors {
     UnsupportedExecutor(String),
     #[error("Executor failed to load")]
     FailedLoadExecutor(#[from] ExecutorError),
+    #[error("Ingestor failed to load")]
+    FailedLoadIngestor,
+    #[error("File not found")]
+    FileNotFound,
+    #[error("Metadata not found")]
+    MetadataNotFound(#[from] Error),
+    #[error("Database query failed")]
+    DatabaseError(#[from] duckdb::Error),
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
@@ -25,6 +52,30 @@ pub struct SolverConfig {
     pub solvers: BTreeMap<String, Solver>,
     // Tests as sets of test files, again only a stub for e.g., an interface of some kind
     pub tests: BTreeMap<String, TestSet>,
+    // Config for all ingestor related setups
+    pub ingest: BTreeMap<String, IngestorConfig>,
+
+    #[serde(alias = "db")]
+    pub database: DatabaseConfig,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct DatabaseConfig {
+    #[serde(default = "default_database_path")]
+    pub path: PathBuf,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct IngestorConfig {
+    // Name of the selected ingestor type
+    pub name: String,
+
+    // parameters for the databse that apply over all tests
+    // TODO: Make this fully typed with an enum
+    #[serde(default)]
+    pub parameter: BTreeMap<String, serde_yaml::Value>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
@@ -57,9 +108,35 @@ pub struct Solver {
     #[serde(default)]
     pub params: Vec<String>,
     pub ingest: String,
+    #[serde(default, skip)]
+    pub _id: i32,
 }
 
 impl SolverConfig {
+    /// load, if possible, all ingestors
+    pub fn load_ingestors(&self, connection: Connection) -> Result<IngestorMap, ConfigErrors> {
+        let mut ingestors = IngestorMap::new();
+        let mut contains_error = false;
+
+        for (name, config) in self.ingest.iter() {
+            match Ingestors::load(config, connection.clone()) {
+                Ok(ingestor) => {
+                    ingestors.insert(name.clone(), ingestor);
+                }
+                Err(e) => {
+                    error!("ingestor {name} failed to load: {e}");
+                    contains_error = true;
+                }
+            };
+        }
+
+        if contains_error {
+            Err(ConfigErrors::FailedLoadIngestor)
+        } else {
+            Ok(ingestors)
+        }
+    }
+
     /// Compile all globs for the test sets
     pub fn compile_globs(&mut self) -> Result<Vec<GlobMatcher>, Vec<(String, globset::Error)>> {
         let mut errors = Vec::new();
@@ -87,7 +164,7 @@ impl SolverConfig {
     }
 
     pub fn preflight_checks(&mut self) -> bool {
-        // TODO: Below is not performant nor clean, it should only work as a stand in
+        // TODO: Below is not performant nor clean, it should only work as a band aid solution
 
         // attempt to catch all errors instead of piece-by-piece to make debugging easier for users
         let mut contains_error = false;
@@ -97,29 +174,64 @@ impl SolverConfig {
             contains_error = true;
         }
 
+        for (name, config) in self.ingest.iter_mut() {
+            config.name = config.name.to_lowercase();
+
+            match config.name.as_str() {
+                "raw" => {
+                    if config
+                        .parameter
+                        .get("exec")
+                        .filter(|value| value.is_string())
+                        // TODO: Add proper error handling below
+                        .filter(|value| {
+                            check_executable(&PathBuf::from(value.as_str().unwrap())).unwrap()
+                        })
+                        .is_none()
+                    {
+                        error!("ingestor.{name}.parameter.exec must be a valid path to an executable file");
+                        contains_error = true;
+                    }
+                }
+                ingestor_name => {
+                    error!("ingestor.{name}.name ({ingestor_name}) is not supported, please use `raw` for now");
+                    contains_error = true;
+                }
+            }
+        }
+        let supported_ingestors = self.ingest.keys().sorted().cloned().collect_vec();
+
         for (name, solver) in self.solvers.iter() {
+            if supported_ingestors.binary_search(&solver.ingest).is_err() {
+                error!(
+                    "solvers.{name}.ingest '{}' is not defined in ingestors",
+                    solver.ingest
+                );
+                contains_error = true;
+            }
+
             if !solver.exec.is_file() {
                 error!(
-                    "Failed to find {name}.exec. Either not a file or not found at {}",
+                    "Failed to find solvers.{name}.exec. Either not a file or not found at {}",
                     solver.exec.to_string_lossy()
                 );
 
                 contains_error = true;
             } else {
-                match File::open(&solver.exec).map(|file| file.metadata()) {
-                    Ok(Ok(metadata)) => {
-                        if (metadata.mode() & 0o111) == 0 {
-                            warn!(
-                        "Solver {name} target {:?} is not executable, this might cause problems",
-                        solver.exec
+                match check_executable(&solver.exec) {
+                    Ok(is_executable) => {
+                        if !is_executable {
+                            error!(
+                        "Solver {name} target {} is not executable, this might cause problems",
+                        solver.exec.to_string_lossy()
                     );
+                            contains_error = true;
                         }
                     }
-                    Ok(Err(e)) | Err(e) => {
+                    Err(e) => {
                         error!(
-                            "Failed to lookup mode of solver {} for {}: {e}",
-                            solver.exec.to_string_lossy(),
-                            name
+                            "Failed to determine in solvers.{name}.exec ({}) is an executable: {e}",
+                            solver.exec.to_string_lossy()
                         );
 
                         contains_error = true;
@@ -163,4 +275,8 @@ impl SolverConfig {
 
         contains_error
     }
+}
+
+fn default_database_path() -> PathBuf {
+    PathBuf::from_str("satan.db").unwrap()
 }

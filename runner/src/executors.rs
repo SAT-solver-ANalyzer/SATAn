@@ -1,25 +1,33 @@
 mod local;
 
-use crate::config::{ConfigErrors, SolverConfig};
+use crate::{
+    config::{ConfigErrors, SolverConfig},
+    ingest::IngestorMap,
+};
 use thiserror::Error;
 
 #[derive(Error, Debug, Clone)]
 pub enum ExecutorError {}
 
-/// Trait for handling all builtin executors
-pub trait Executor: Sized {
-    fn load(config: SolverConfig) -> Result<Self, ExecutorError>;
-    fn execute(&mut self) -> Result<(), ExecutorError>;
+#[derive(Clone, Debug)]
+pub enum Executors<'a> {
+    Local(local::LocalExecutor<'a>),
 }
 
-#[derive(Clone, Debug)]
-pub struct Executors;
-
-impl Executors {
-    pub fn load(config: SolverConfig) -> Result<impl Executor, ConfigErrors> {
-        match config.executor.name.to_lowercase().as_str() {
-            "local" => Ok(local::LocalExecutor::load(config)?),
+impl<'a> Executors<'a> {
+    pub fn load(
+        config: SolverConfig,
+        ingestors: IngestorMap<'a>,
+    ) -> Result<Self, ConfigErrors> {
+        match config.executor.name.as_str() {
+            "local" => Ok(Self::Local(local::LocalExecutor::load(config, ingestors)?)),
             _ => Err(ConfigErrors::UnsupportedExecutor(config.executor.name)),
+        }
+    }
+
+    pub fn execute(&mut self) -> Result<(), ExecutorError> {
+        match self {
+            Self::Local(executor) => executor.execute(),
         }
     }
 }

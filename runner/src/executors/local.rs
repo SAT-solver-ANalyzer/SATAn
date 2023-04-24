@@ -1,11 +1,12 @@
-use super::{Executor, ExecutorError};
-use crate::config::SolverConfig;
+use super::ExecutorError;
+use crate::{config::SolverConfig, ingest::Ingestors};
 use affinity::{get_core_num, set_thread_affinity};
 use ignore::WalkBuilder;
 use itertools::{iproduct, Itertools};
 use rayon::{prelude::*, ThreadPoolBuilder};
 use std::{
     borrow::Cow,
+    collections::BTreeMap,
     io::Read,
     process::{exit, Command, Stdio},
     sync::{
@@ -20,19 +21,24 @@ use wait_timeout::ChildExt;
 const ATOMIC_ORDERING: Ordering = Ordering::SeqCst;
 
 /// Executor that works on a local rayon-backed thread pool
-pub struct LocalExecutor {
+#[derive(Debug, Clone)]
+pub struct LocalExecutor<'a> {
     config: SolverConfig,
+    ingestors: BTreeMap<String, Ingestors<'a>>,
 }
 
-impl Executor for LocalExecutor {
+impl<'a> LocalExecutor<'a> {
     /// create a new LocalExecutor instance
-    fn load(config: SolverConfig) -> Result<Self, ExecutorError> {
-        Ok(Self { config })
+    pub fn load(
+        config: SolverConfig,
+        ingestors: BTreeMap<String, Ingestors<'a>>,
+    ) -> Result<Self, ExecutorError> {
+        Ok(Self { config, ingestors })
     }
 
     /// execute jobs concurrently with a thread pool
     #[instrument(skip(self), level = "info")]
-    fn execute(&mut self) -> Result<(), ExecutorError> {
+    pub fn execute(&mut self) -> Result<(), ExecutorError> {
         // pre compile all globs into matchers
         // NOTE: These are kept seperate from `config` to move them in the final map
         let globs = match self.config.compile_globs() {
@@ -151,14 +157,14 @@ impl Executor for LocalExecutor {
                 // TODO: Another map may be used here to allow for fast access
                 // For testing this is sufficient though
                 let solver = self.config.solvers.get(&solver_name).unwrap();
-                let timeout = Duration::from_nanos(set.timeout as u64);
+                let timeout = Duration::from_millis(set.timeout as u64);
                 let start = Instant::now();
 
                 // this thread is created after the initial thread and inherits it's CPU affinity
                 match Command::new(&solver.exec)
                     .args(solver.params.iter())
                     .args(set.params.as_ref().unwrap_or(&[].to_vec()))
-                    .arg(file)
+                    .arg(&file)
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
                     .spawn()
@@ -170,13 +176,31 @@ impl Executor for LocalExecutor {
                             let mut output = String::new();
                             stdout.read_to_string(&mut output).expect("Failed to read");
 
+                            let mut stderr = child.stdout.take().unwrap();
+                            let mut err_output = String::new();
+                            stderr.read_to_string(&mut err_output).expect("Failed to read");
+
                             debug!(
-                                "Finished in {} ns | status: {}",
-                                elapsed.as_nanos(),
-                                status.success()
+                                "Finished in {} ms | status: {}",
+                                elapsed.as_millis(),
+                                status
                             );
                             trace!("Output: {output}");
-                            // TODO: Here is the part where ingest needs to be attached
+
+                            if let Err(e) = self.ingestors.get(&solver.ingest).unwrap().ingest(
+                                status.code().unwrap_or(i32::MIN),
+                                output,
+                                err_output,
+                            ) {
+                                let lossy_filename = file.to_string_lossy();
+
+                                error!(
+                                    solver = solver_name,
+                                    set = name.as_ref(),
+                                    file = lossy_filename.as_ref(),
+                                    "Failed to ingest record: {e}"
+                                );
+                            }
                         }
                         None => {
                             // child hasn't exited yet
