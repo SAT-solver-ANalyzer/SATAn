@@ -134,7 +134,7 @@ fn main() -> Result<(), ConfigErrors> {
         let tx = connection.transaction()?;
 
         // check if either no solver with the name is found or none with their parameters exists
-        if results.len() == 0
+        if results.is_empty()
             || !results.iter().all(|result| {
                 result.1 != solver.exec.to_string_lossy()
                     || result.2 != solver.params.join(" ")
@@ -184,7 +184,7 @@ fn main() -> Result<(), ConfigErrors> {
             .map(|params| params.join(" "))
             .unwrap_or("".to_owned());
 
-        if results.len() == 0
+        if results.is_empty()
             || !results
                 .iter()
                 .all(|result| (result.2 != params || result.1 != set.timeout as u32))
@@ -205,7 +205,7 @@ fn main() -> Result<(), ConfigErrors> {
     let benchmark_id = connection.query_row(
         "insert into benchmarks values (nextval('seq_benchmarks'), ?) returning id;",
         params![args.comment.unwrap_or("".to_owned())],
-        |row| Ok(row.get(0)?),
+        |row| row.get(0),
     )?;
 
     // wrap the connection to allow for safe, concurrent access

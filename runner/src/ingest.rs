@@ -60,7 +60,7 @@ pub enum Ingestors<'a> {
 impl Ingestors<'_> {
     pub fn load(config: &IngestorConfig) -> Result<Self, ConfigErrors> {
         match config.name.to_lowercase().as_str() {
-            "raw" => exec::RawIngestor::load(config).map(|ingestor| Ingestors::Raw(ingestor)),
+            "raw" => exec::RawIngestor::load(config).map(Ingestors::Raw),
             _ => Err(ConfigErrors::FailedLoadIngestor),
         }
     }

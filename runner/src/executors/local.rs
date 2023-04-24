@@ -2,11 +2,10 @@ use super::ExecutorError;
 use crate::{
     config::SolverConfig,
     database::{util::IDMap, Connection},
-    ingest::{IngestorError, IngestorMap, RunContext, RunOutput},
+    ingest::{IngestorMap, RunContext, RunOutput},
 };
 use affinity::{get_core_num, set_thread_affinity};
 use cowstr::CowStr;
-use duckdb::params;
 use ignore::WalkBuilder;
 use itertools::{iproduct, Itertools};
 use rayon::{prelude::*, ThreadPoolBuilder};
@@ -228,12 +227,7 @@ impl<'a> LocalExecutor<'a> {
                                 benchmark: self.benchmark,
                                 path: file.clone(),
                             };
-                            match self
-                                .ingestors
-                                .get(&solver.ingest)
-                                .unwrap()
-                                .ingest(output)
-                            {
+                            match self.ingestors.get(&solver.ingest).unwrap().ingest(output) {
                                 Ok(metrics) => {
                                     let mut lock = match self.connection.lock() {
                                         Ok(guard) => guard,
@@ -256,7 +250,7 @@ impl<'a> LocalExecutor<'a> {
                                         Ok(id) => {
                                             info!("Saving run {}...", id);
                                             if let Err(e) = tx.commit() {
-                                                error!("Failed to commit run {id}")
+                                                error!("Failed to commit run {id}: {e}")
                                             }
                                         }
                                         Err(e) => error!("Failed to insert metric: {e}"),

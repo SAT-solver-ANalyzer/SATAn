@@ -70,7 +70,7 @@ impl TestMetrics {
                 returning id",
         )?;
 
-        Ok(stmt.query_row(
+        stmt.query_row(
             params![
                 self.runtime,
                 self.parse_time,
@@ -88,14 +88,14 @@ impl TestMetrics {
                 context.benchmark
             ],
             |row| row.get(0),
-        )?)
+        )
     }
 }
 
 // TODO: Document below, maybe add some kind of migration utility
 // ref: https://duckdb.org/docs/sql/statements/create_table.html
 //      https://duckdb.org/docs/sql/data_types/overview
-pub const SQL_SCHEMA: [&'static str; 8] = [
+pub const SQL_SCHEMA: [&str; 8] = [
     "create sequence if not exists seq_benchmarks start 1 no cycle;",
     "create table if not exists benchmarks (
     id integer primary key default(nextval('seq_benchmarks')),

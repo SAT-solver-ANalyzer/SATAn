@@ -1,4 +1,4 @@
-use super::{IngestorError, RunContext, RunOutput};
+use super::{IngestorError, RunOutput};
 use crate::{
     config::{ConfigErrors, IngestorConfig},
     database::TestMetrics,
