@@ -2,12 +2,16 @@ mod local;
 
 use crate::{
     config::{ConfigErrors, SolverConfig},
-    ingest::IngestorMap,
+    database::{util::IDMap, Connection},
+    ingest::{IngestorError, IngestorMap},
 };
 use thiserror::Error;
 
-#[derive(Error, Debug, Clone)]
-pub enum ExecutorError {}
+#[derive(Error, Debug)]
+pub enum ExecutorError {
+    #[error("Ingest step failed")]
+    IngestError(#[from] IngestorError),
+}
 
 #[derive(Clone, Debug)]
 pub enum Executors<'a> {
@@ -16,11 +20,17 @@ pub enum Executors<'a> {
 
 impl<'a> Executors<'a> {
     pub fn load(
+        connection: Connection,
         config: SolverConfig,
         ingestors: IngestorMap<'a>,
+        solvers: IDMap,
+        testsets: IDMap,
+        benchmark: i32,
     ) -> Result<Self, ConfigErrors> {
         match config.executor.name.as_str() {
-            "local" => Ok(Self::Local(local::LocalExecutor::load(config, ingestors)?)),
+            "local" => Ok(Self::Local(local::LocalExecutor::load(
+                connection, config, solvers, testsets, benchmark, ingestors,
+            )?)),
             _ => Err(ConfigErrors::UnsupportedExecutor(config.executor.name)),
         }
     }

@@ -285,7 +285,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4114279215a005bc675e386011e594e1d9b800918cea18fcadadcce864a2046b"
 dependencies = [
  "borsh-derive",
- "hashbrown 0.12.3",
+ "hashbrown 0.13.2",
 ]
 
 [[package]]
@@ -499,10 +499,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "constptr"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9f6b816ec3d57d4febea032f3ce2bf9dca119f999a865f9f24d7020d9eb5167e"
+
+[[package]]
 name = "core-foundation-sys"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e496a50fda8aacccc86d7529e2c1e0892dbd0f898a6b5645b5561b89c3210efa"
+
+[[package]]
+name = "cowstr"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9faed5836fc6e3d141016c464e20554dae148fd262960b2f2f33c21fbe54a4df"
+dependencies = [
+ "constptr",
+ "mutants",
+ "threadcell",
+]
 
 [[package]]
 name = "crossbeam-channel"
@@ -710,6 +727,9 @@ name = "hashbrown"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "43a3c133739dddd0d2990f9a4bdf8eb4b21ef50e4851ca85ab661199821d510e"
+dependencies = [
+ "ahash 0.8.3",
+]
 
 [[package]]
 name = "hashlink"
@@ -988,6 +1008,12 @@ checksum = "d61c719bcfbcf5d62b3a09efa6088de8c54bc0bfcd3ea7ae39fcc186108b8de1"
 dependencies = [
  "autocfg",
 ]
+
+[[package]]
+name = "mutants"
+version = "0.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc0287524726960e07b119cebd01678f852f147742ae0d925e6a520dca956126"
 
 [[package]]
 name = "nu-ansi-term"
@@ -1344,6 +1370,7 @@ version = "0.1.0"
 dependencies = [
  "affinity",
  "clap",
+ "cowstr",
  "duckdb",
  "globset",
  "ignore",
@@ -1546,6 +1573,15 @@ checksum = "3fdd6f064ccff2d6567adcb3873ca630700f00b5ad3f060c25b5dcfd9a4ce152"
 dependencies = [
  "cfg-if",
  "once_cell",
+]
+
+[[package]]
+name = "threadcell"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a775dd9b65e9117d642e63143b49b642dae42ba52c5371694420f378225244f1"
+dependencies = [
+ "mutants",
 ]
 
 [[package]]

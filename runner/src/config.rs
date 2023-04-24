@@ -1,5 +1,4 @@
 use crate::{
-    database::Connection,
     executors::ExecutorError,
     ingest::{IngestorMap, Ingestors},
 };
@@ -114,12 +113,12 @@ pub struct Solver {
 
 impl SolverConfig {
     /// load, if possible, all ingestors
-    pub fn load_ingestors(&self, connection: Connection) -> Result<IngestorMap, ConfigErrors> {
+    pub fn load_ingestors(&self) -> Result<IngestorMap, ConfigErrors> {
         let mut ingestors = IngestorMap::new();
         let mut contains_error = false;
 
         for (name, config) in self.ingest.iter() {
-            match Ingestors::load(config, connection.clone()) {
+            match Ingestors::load(config) {
                 Ok(ingestor) => {
                     ingestors.insert(name.clone(), ingestor);
                 }
@@ -185,7 +184,9 @@ impl SolverConfig {
                         .filter(|value| value.is_string())
                         // TODO: Add proper error handling below
                         .filter(|value| {
-                            check_executable(&PathBuf::from(value.as_str().unwrap())).unwrap()
+                            check_executable(&PathBuf::from(value.as_str().unwrap()))
+                                .ok()
+                                .unwrap_or(false)
                         })
                         .is_none()
                     {

@@ -1,12 +1,17 @@
 use super::ExecutorError;
-use crate::{config::SolverConfig, ingest::Ingestors};
+use crate::{
+    config::SolverConfig,
+    database::{util::IDMap, Connection},
+    ingest::{IngestorError, IngestorMap, RunContext, RunOutput},
+};
 use affinity::{get_core_num, set_thread_affinity};
+use cowstr::CowStr;
+use duckdb::params;
 use ignore::WalkBuilder;
 use itertools::{iproduct, Itertools};
 use rayon::{prelude::*, ThreadPoolBuilder};
 use std::{
     borrow::Cow,
-    collections::BTreeMap,
     ffi::OsStr,
     io::Read,
     process::{exit, Command, Stdio},
@@ -16,7 +21,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tracing::{debug, error, info, instrument, trace, warn};
+use tracing::{debug, error, info, instrument, warn};
 use wait_timeout::ChildExt;
 
 const ATOMIC_ORDERING: Ordering = Ordering::SeqCst;
@@ -24,17 +29,32 @@ const ATOMIC_ORDERING: Ordering = Ordering::SeqCst;
 /// Executor that works on a local rayon-backed thread pool
 #[derive(Debug, Clone)]
 pub struct LocalExecutor<'a> {
+    benchmark: i32,
     config: SolverConfig,
-    ingestors: BTreeMap<String, Ingestors<'a>>,
+    connection: Connection,
+    solvers: IDMap,
+    testsets: IDMap,
+    ingestors: IngestorMap<'a>,
 }
 
 impl<'a> LocalExecutor<'a> {
     /// create a new LocalExecutor instance
     pub fn load(
+        connection: Connection,
         config: SolverConfig,
-        ingestors: BTreeMap<String, Ingestors<'a>>,
+        solvers: IDMap,
+        testsets: IDMap,
+        benchmark: i32,
+        ingestors: IngestorMap<'a>,
     ) -> Result<Self, ExecutorError> {
-        Ok(Self { config, ingestors })
+        Ok(Self {
+            connection,
+            config,
+            ingestors,
+            benchmark,
+            solvers,
+            testsets,
+        })
     }
 
     /// execute jobs concurrently with a thread pool
@@ -114,7 +134,7 @@ impl<'a> LocalExecutor<'a> {
             .zip(globs.into_iter())
             // ensure set.solvers is always defined
             // Prepare for thread safety
-            .map(|((name, set), glob)| (Cow::from(name), Arc::from(set), glob))
+            .map(|((name, set), glob)| (CowStr::from(name.as_str()), Arc::from(set), glob))
             .flat_map(|(name, set, glob)| {
                 let cloned_paths = set.paths.clone();
                 let (first, others) = cloned_paths.split_first().unwrap();
@@ -137,7 +157,7 @@ impl<'a> LocalExecutor<'a> {
                             None
                         }
                     })
-                    .map(|path| path.into_path())
+                    .map(|path| Cow::from(path.into_path()))
                     .collect_vec();
 
                 // increase total counter for progress bar
@@ -145,8 +165,13 @@ impl<'a> LocalExecutor<'a> {
 
                 // create actual tasks for all sets x solvers, including test metadata for
                 // ingesting
-                iproduct!(paths, set.solvers.clone())
-                    .map(move |(path, solver)| (name.clone(), set.clone(), solver, path))
+                iproduct!(
+                    paths,
+                    set.solvers
+                        .iter()
+                        .map(|solver| CowStr::from(solver.as_str()))
+                )
+                .map(move |(path, solver)| (name.clone(), set.clone(), solver, path))
             })
             .par_bridge()
             .for_each(|(name, set, solver_name, file)| {
@@ -157,55 +182,97 @@ impl<'a> LocalExecutor<'a> {
 
                 // TODO: Another map may be used here to allow for fast access
                 // For testing this is sufficient though
-                let solver = self.config.solvers.get(&solver_name).unwrap();
+                let solver = self.config.solvers.get(solver_name.as_ref()).unwrap();
                 let timeout = Duration::from_millis(set.timeout as u64);
                 let start = Instant::now();
 
                 // this thread is created after the initial thread and inherits it's CPU affinity
                 match Command::new(&solver.exec)
                     .args(solver.params.iter())
-                    .args(set.params.as_ref().unwrap_or(&[].to_vec()))
-                    .arg(&file)
+                    .args(set.params.as_ref().unwrap_or(&Vec::new()))
+                    .arg(file.as_os_str())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
                     .spawn()
                 {
                     Ok(mut child) => match child.wait_timeout(timeout).unwrap() {
                         Some(status) => {
+                            let mut output = RunOutput::new();
+                            output.status = status.code().unwrap_or(i32::MIN);
+
                             // TODO: Add a lot of error fallback around this, in particular the
                             // unwrap and expect parts that involve io
-                            let elapsed = start.elapsed();
+                            output.runtime = start.elapsed().as_millis();
                             let mut stdout = child.stdout.take().unwrap();
-                            let mut output = String::new();
-                            stdout.read_to_string(&mut output).expect("Failed to read");
+                            stdout
+                                .read_to_string(&mut output.stdout)
+                                .expect("Failed to read stdout");
 
                             let mut stderr = child.stderr.take().unwrap();
-                            let mut err_output = String::new();
                             stderr
-                                .read_to_string(&mut err_output)
-                                .expect("Failed to read");
+                                .read_to_string(&mut output.stderr)
+                                .expect("Failed to read stderr");
 
-                            debug!(
-                                "Finished in {} ms | status: {}",
-                                elapsed.as_millis(),
-                                status
-                            );
-                            trace!("Output: {output}");
+                            debug!("Finished in {} ms | status: {}", output.runtime, status);
+                            debug!(test = name.to_string(), solver = solver_name.to_string());
 
-                            if let Err(e) = self.ingestors.get(&solver.ingest).unwrap().ingest(
-                                status.code().unwrap_or(i32::MIN),
-                                output,
-                                err_output,
-                            ) {
-                                let lossy_filename = file.to_string_lossy();
+                            let context = RunContext {
+                                solver: (
+                                    *self.solvers.get(&solver_name.to_string()).unwrap(),
+                                    solver_name.clone(),
+                                ),
+                                testset: (
+                                    *self.testsets.get(&name.to_string()).unwrap(),
+                                    name.clone(),
+                                ),
+                                benchmark: self.benchmark,
+                                path: file.clone(),
+                            };
+                            match self
+                                .ingestors
+                                .get(&solver.ingest)
+                                .unwrap()
+                                .ingest(output)
+                            {
+                                Ok(metrics) => {
+                                    let mut lock = match self.connection.lock() {
+                                        Ok(guard) => guard,
+                                        Err(e) => {
+                                            error!("Failed to acquire connection guard: {e}");
+                                            return;
+                                        }
+                                    };
+                                    debug!("Inserting {metrics:?}...");
+                                    let mut tx = match lock.transaction() {
+                                        Ok(tx) => tx,
+                                        Err(e) => {
+                                            error!("Failed to acquire transaction: {e}");
 
-                                error!(
-                                    solver = solver_name,
-                                    set = name.as_ref(),
-                                    file = lossy_filename.as_ref(),
-                                    "Failed to ingest record: {e}"
-                                );
-                            }
+                                            return;
+                                        }
+                                    };
+
+                                    match metrics.insert(&mut tx, context) {
+                                        Ok(id) => {
+                                            info!("Saving run {}...", id);
+                                            if let Err(e) = tx.commit() {
+                                                error!("Failed to commit run {id}")
+                                            }
+                                        }
+                                        Err(e) => error!("Failed to insert metric: {e}"),
+                                    };
+                                }
+                                Err(e) => {
+                                    let lossy_filename = file.to_string_lossy();
+
+                                    error!(
+                                        solver = solver_name.as_str(),
+                                        set = name.as_ref(),
+                                        file = lossy_filename.as_ref(),
+                                        "Failed to ingest record: {e}"
+                                    );
+                                }
+                            };
                         }
                         None => {
                             // child hasn't exited yet

@@ -3,7 +3,7 @@ mod database;
 mod executors;
 mod ingest;
 
-use crate::database::{SQL_SCHEMA, SQL_SCHEMA_NUMBER};
+use crate::database::{util::retrieve_ids, SQL_SCHEMA, SQL_SCHEMA_NUMBER};
 use clap::{crate_name, crate_version, Parser};
 use config::ConfigErrors;
 use duckdb::{params, Connection};
@@ -21,7 +21,8 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 struct Args {
     #[arg(short = 'c', long = "config", value_name = "CONFIG", value_hint = clap::ValueHint::FilePath)]
     config: PathBuf,
-    // TODO: Add args for selecting solvers and test sets
+    #[arg(long = "comment", value_name = "COMMENT")]
+    comment: Option<String>, // TODO: Add args for selecting solvers and test sets
 }
 
 fn main() -> Result<(), ConfigErrors> {
@@ -77,7 +78,7 @@ fn main() -> Result<(), ConfigErrors> {
 
     // Check semantic structure (solver references, etc.)
     if config.preflight_checks() {
-        error!("Config contais one or more errors, see previous error messages");
+        error!("Config contains one or more errors, see previous error messages");
 
         exit(1);
     }
@@ -131,7 +132,6 @@ fn main() -> Result<(), ConfigErrors> {
             })?;
 
         let tx = connection.transaction()?;
-        let mut appender = tx.appender("solvers")?;
 
         // check if either no solver with the name is found or none with their parameters exists
         if results.len() == 0
@@ -141,25 +141,79 @@ fn main() -> Result<(), ConfigErrors> {
                     || result.3 != solver.ingest
             })
         {
-            appender.append_row(params![
-                0,
-                name,
-                solver.exec.to_string_lossy(),
-                solver.params.join(" "),
-                solver.ingest
-            ])?;
-            info!("Created solver entry for {name}");
+            tx.execute(
+                "insert into solvers values (nextval('seq_solver_id'), ?, ?, ?, ?)",
+                params![
+                    name,
+                    solver.exec.to_string_lossy(),
+                    solver.params.join(" "),
+                    solver.ingest
+                ],
+            )?;
+            info!("Created solver entry for {name}")
         }
 
-        drop(appender);
         tx.commit()?;
     }
 
+    for (name, set) in config.tests.iter() {
+        /*
+           id integer primary key default(nextval('seq_testset')),
+           timout uinteger not null,
+           name varchar not null,
+           params varchar not null,
+        * */
+
+        let results = connection
+            .prepare_cached("select id, timeout, params from test_sets where name = ?")?
+            .query_map(params![name], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
+            .try_fold(Vec::new(), |mut init, result| {
+                init.push(result?);
+
+                Ok::<Vec<(i32, u32, String)>, ConfigErrors>(init)
+            })?;
+
+        let tx = connection.transaction()?;
+
+        // check if either no solver with the name is found or none with their parameters exists
+        let params = set
+            .params
+            .clone()
+            .map(|params| params.join(" "))
+            .unwrap_or("".to_owned());
+
+        if results.len() == 0
+            || !results
+                .iter()
+                .all(|result| (result.2 != params || result.1 != set.timeout as u32))
+        {
+            tx.execute(
+                "insert into test_sets values (nextval('seq_testset'), ?, ?, ?)",
+                params![set.timeout, name, params],
+            )?;
+            info!("Created solver entry for {name}");
+        }
+
+        tx.commit()?;
+    }
+
+    // collect solver and test set ids into a map for easier access during execution and ingestion
+    let solver_ids = retrieve_ids(&connection, "select id, name from solvers")?;
+    let testset_ids = retrieve_ids(&connection, "select id, name from test_sets")?;
+    let benchmark_id = connection.query_row(
+        "insert into benchmarks values (nextval('seq_benchmarks'), ?) returning id;",
+        params![args.comment.unwrap_or("".to_owned())],
+        |row| Ok(row.get(0)?),
+    )?;
+
+    // wrap the connection to allow for safe, concurrent access
     let shared_connection = Arc::new(Mutex::new(connection));
 
     // TODO: Get rid of full clone here, this should be limited to config.ingest
     let cloned_config = config.clone();
-    let ingestors = match cloned_config.load_ingestors(shared_connection) {
+    let ingestors = match cloned_config.load_ingestors() {
         Ok(ingestors) => ingestors,
         Err(e) => {
             error!("Failed to initialize ingestors after preflight checks: {e}");
@@ -168,7 +222,7 @@ fn main() -> Result<(), ConfigErrors> {
     };
 
     // select an executor and throw the queue at it
-    match executors::Executors::load(config, ingestors) {
+    match executors::Executors::load(shared_connection, config, ingestors, solver_ids, testset_ids, benchmark_id) {
         Ok(mut executor) => match executor.execute() {
             Ok(()) => info!("Finished execution"),
             Err(e) => error!("Executor failed: {e}"),
