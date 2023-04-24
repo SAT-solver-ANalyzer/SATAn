@@ -7,6 +7,7 @@ use rayon::{prelude::*, ThreadPoolBuilder};
 use std::{
     borrow::Cow,
     collections::BTreeMap,
+    ffi::OsStr,
     io::Read,
     process::{exit, Command, Stdio},
     sync::{
@@ -136,7 +137,7 @@ impl<'a> LocalExecutor<'a> {
                             None
                         }
                     })
-                    .map(|path| path.into_path().as_os_str().to_owned())
+                    .map(|path| path.into_path())
                     .collect_vec();
 
                 // increase total counter for progress bar
@@ -171,14 +172,18 @@ impl<'a> LocalExecutor<'a> {
                 {
                     Ok(mut child) => match child.wait_timeout(timeout).unwrap() {
                         Some(status) => {
+                            // TODO: Add a lot of error fallback around this, in particular the
+                            // unwrap and expect parts that involve io
                             let elapsed = start.elapsed();
                             let mut stdout = child.stdout.take().unwrap();
                             let mut output = String::new();
                             stdout.read_to_string(&mut output).expect("Failed to read");
 
-                            let mut stderr = child.stdout.take().unwrap();
+                            let mut stderr = child.stderr.take().unwrap();
                             let mut err_output = String::new();
-                            stderr.read_to_string(&mut err_output).expect("Failed to read");
+                            stderr
+                                .read_to_string(&mut err_output)
+                                .expect("Failed to read");
 
                             debug!(
                                 "Finished in {} ms | status: {}",
@@ -211,8 +216,12 @@ impl<'a> LocalExecutor<'a> {
                         warn!("Failed with {e}");
                     }
                 };
+
                 info!(
-                    "Done with {}/{}",
+                    "Done with [{name}/{solver_name}/{}] {}/{}",
+                    file.file_name()
+                        .unwrap_or(OsStr::new("?"))
+                        .to_string_lossy(),
                     processed.fetch_add(1, ATOMIC_ORDERING) + 1,
                     total.load(ATOMIC_ORDERING)
                 );
