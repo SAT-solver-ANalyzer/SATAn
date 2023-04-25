@@ -1,7 +1,7 @@
 use super::ExecutorError;
 use crate::{
     config::SolverConfig,
-    database::{util::IDMap, Connection},
+    database::{util::IDMap, Connection, TestMetrics},
     ingest::{IngestorMap, RunContext, RunOutput},
 };
 use affinity::{get_core_num, set_thread_affinity};
@@ -125,6 +125,7 @@ impl<'a> LocalExecutor<'a> {
         // general counters to provide a progress bar
         let total = AtomicU64::new(0);
         let processed = AtomicU64::new(0);
+        let errors = AtomicU64::new(0);
 
         // find all files
         self.config
@@ -139,8 +140,12 @@ impl<'a> LocalExecutor<'a> {
                 let (first, others) = cloned_paths.split_first().unwrap();
                 let mut builder = WalkBuilder::new(first);
 
+                debug!("Filtering with glob: {glob:?}");
                 // use matcher for filtering
-                builder.filter_entry(move |path| glob.is_match(path.path()));
+                /* builder.filter_entry(move |path| {
+                    debug!("Handling {path:?} with {}", path.path());
+                    let result = glob.is_match(path.path());
+                }); */
                 // add other paths
                 others.iter().for_each(|path| {
                     builder.add(path);
@@ -156,8 +161,11 @@ impl<'a> LocalExecutor<'a> {
                             None
                         }
                     })
+                    .filter(|entry| glob.is_match(entry.path()))
                     .map(|path| Cow::from(path.into_path()))
                     .collect_vec();
+
+                debug!("Found paths: {paths:?}");
 
                 // increase total counter for progress bar
                 total.fetch_add((paths.len() * set.solvers.len()) as u64, ATOMIC_ORDERING);
@@ -215,24 +223,23 @@ impl<'a> LocalExecutor<'a> {
                             debug!("Finished in {} ms | status: {}", output.runtime, status);
                             debug!(test = name.to_string(), solver = solver_name.to_string());
 
-                            let context = RunContext {
-                                solver: (
-                                    *self.solvers.get(&solver_name.to_string()).unwrap(),
-                                    solver_name.clone(),
-                                ),
-                                testset: (
-                                    *self.testsets.get(&name.to_string()).unwrap(),
-                                    name.clone(),
-                                ),
-                                benchmark: self.benchmark,
-                                path: file.clone(),
-                            };
+                            let context = RunContext::new(
+                                file.clone(),
+                                &solver_name,
+                                &name,
+                                &self.solvers,
+                                &self.testsets,
+                                self.benchmark,
+                            );
+
                             match self.ingestors.get(&solver.ingest).unwrap().ingest(output) {
                                 Ok(metrics) => {
                                     let mut lock = match self.connection.lock() {
                                         Ok(guard) => guard,
                                         Err(e) => {
                                             error!("Failed to acquire connection guard: {e}");
+                                            errors.fetch_add(1, ATOMIC_ORDERING);
+
                                             return;
                                         }
                                     };
@@ -241,6 +248,7 @@ impl<'a> LocalExecutor<'a> {
                                         Ok(tx) => tx,
                                         Err(e) => {
                                             error!("Failed to acquire transaction: {e}");
+                                            errors.fetch_add(1, ATOMIC_ORDERING);
 
                                             return;
                                         }
@@ -250,10 +258,14 @@ impl<'a> LocalExecutor<'a> {
                                         Ok(id) => {
                                             info!("Saving run {}...", id);
                                             if let Err(e) = tx.commit() {
-                                                error!("Failed to commit run {id}: {e}")
+                                                error!("Failed to commit run {id}: {e}");
+                                                errors.fetch_add(1, ATOMIC_ORDERING);
                                             }
                                         }
-                                        Err(e) => error!("Failed to insert metric: {e}"),
+                                        Err(e) => {
+                                            error!("Failed to insert metric: {e}");
+                                            errors.fetch_add(1, ATOMIC_ORDERING);
+                                        }
                                     };
                                 }
                                 Err(e) => {
@@ -265,30 +277,94 @@ impl<'a> LocalExecutor<'a> {
                                         file = lossy_filename.as_ref(),
                                         "Failed to ingest record: {e}"
                                     );
+
+                                    errors.fetch_add(1, ATOMIC_ORDERING);
                                 }
                             };
                         }
                         None => {
                             // child hasn't exited yet
                             child.kill().unwrap();
+
+                            debug!(
+                                message = "Killed due to timeout",
+                                test = name.to_string(),
+                                solver = solver_name.to_string(),
+                                file = file.to_string_lossy().as_ref()
+                            );
+                            let mut lock = match self.connection.lock() {
+                                Ok(guard) => guard,
+                                Err(e) => {
+                                    error!("Failed to acquire connection guard: {e}");
+                                    errors.fetch_add(1, ATOMIC_ORDERING);
+
+                                    return;
+                                }
+                            };
+                            let mut tx = match lock.transaction() {
+                                Ok(tx) => tx,
+                                Err(e) => {
+                                    error!("Failed to acquire transaction: {e}");
+                                    errors.fetch_add(1, ATOMIC_ORDERING);
+
+                                    return;
+                                }
+                            };
+
+                            let context = RunContext::new(
+                                file.clone(),
+                                &solver_name,
+                                &name,
+                                &self.solvers,
+                                &self.testsets,
+                                self.benchmark,
+                            );
+
+                            // NOTE: This is guaranteed by the timeout in the config being limited
+                            // in size
+                            match TestMetrics::failed(start.elapsed().as_millis() as u64)
+                                .insert(&mut tx, context)
+                            {
+                                Ok(id) => {
+                                    info!("Saving run {}...", id);
+                                    if let Err(e) = tx.commit() {
+                                        error!("Failed to commit run {id}: {e}");
+                                        errors.fetch_add(1, ATOMIC_ORDERING);
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("Failed to insert metric: {e}");
+                                    errors.fetch_add(1, ATOMIC_ORDERING);
+                                }
+                            };
                         }
                     },
                     Err(e) => {
-                        warn!("Failed with {e}");
+                        warn!("Failed to spawn child process: {e}");
+
+                        errors.fetch_add(1, ATOMIC_ORDERING);
                     }
                 };
 
                 info!(
-                    "Done with [{name}/{solver_name}/{}] {}/{}",
+                    "Done with [{name}/{solver_name}/{}] {}/{} [errors: {}]",
                     file.file_name()
                         .unwrap_or(OsStr::new("?"))
                         .to_string_lossy(),
                     processed.fetch_add(1, ATOMIC_ORDERING) + 1,
-                    total.load(ATOMIC_ORDERING)
+                    total.load(ATOMIC_ORDERING),
+                    errors.load(ATOMIC_ORDERING)
                 );
             });
 
-        info!("Done with processing {} items", total.load(ATOMIC_ORDERING));
+        // finish the whole thing with a small confirmation message
+        info!("Done with processing {} items", total.load(ATOMIC_ORDERING),);
+
+        let encountered_errors = errors.load(ATOMIC_ORDERING);
+
+        if encountered_errors > 0 {
+            warn!("{encountered_errors} errors were encountered during execution, consult the logs for more information")
+        }
 
         Ok(())
     }

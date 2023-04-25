@@ -1,6 +1,6 @@
 {
   inputs = {
-    nixpkgs.url = "nixpkgs";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
     rust-overlay.url = "github:oxalica/rust-overlay";
   };
@@ -19,6 +19,7 @@
           openssl_3
           minisat
           cadical
+          duckdb
           (rust-bin.stable.latest.default.override {
             extensions = [ "rust-src" ];
             targets = [ "wasm32-unknown-unknown" ];

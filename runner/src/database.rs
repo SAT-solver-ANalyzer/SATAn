@@ -59,6 +59,21 @@ pub struct TestMetrics {
 }
 
 impl TestMetrics {
+    pub fn failed(runtime: u64) -> Self {
+        Self {
+            runtime,
+            conflict_literals: 0,
+            propagations: 0,
+            number_of_clauses: 0,
+            number_of_variables: 0,
+            parse_time: 0,
+            restarts: 0,
+            satisfiable: Satisfiability::Unknown,
+            conflicts: 0,
+            memory_usage: 0,
+        }
+    }
+
     pub fn insert(
         self,
         tx: &mut duckdb::Transaction,

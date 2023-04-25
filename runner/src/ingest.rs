@@ -2,7 +2,7 @@ pub mod exec;
 
 use crate::{
     config::{ConfigErrors, IngestorConfig},
-    database::TestMetrics,
+    database::{util::IDMap, TestMetrics},
 };
 use cowstr::CowStr;
 use std::{borrow::Cow, collections::BTreeMap, path::Path};
@@ -48,6 +48,27 @@ pub struct RunContext<'a> {
     pub path: Cow<'a, Path>,
     pub solver: (i32, CowStr),
     pub testset: (i32, CowStr),
+}
+
+impl<'a> RunContext<'a> {
+    pub fn new(
+        path: Cow<'a, Path>,
+        solver_name: &CowStr,
+        name: &CowStr,
+        solvers: &IDMap,
+        testsets: &IDMap,
+        benchmark: i32,
+    ) -> Self {
+        Self {
+            solver: (
+                *solvers.get(&solver_name.to_string()).unwrap(),
+                solver_name.clone(),
+            ),
+            testset: (*testsets.get(&name.to_string()).unwrap(), name.clone()),
+            benchmark,
+            path: path.clone(),
+        }
+    }
 }
 
 pub type IngestorMap<'a> = BTreeMap<String, Ingestors<'a>>;
