@@ -3,11 +3,12 @@ mod database;
 mod executors;
 mod ingest;
 
-use crate::database::{util::retrieve_ids, SQL_SCHEMA, SQL_SCHEMA_NUMBER};
+use crate::database::{SQL_SCHEMA, SQL_SCHEMA_NUMBER};
 use clap::{crate_name, crate_version, Parser};
 use config::ConfigErrors;
 use duckdb::{params, Connection};
 use std::{
+    collections::BTreeMap,
     fs::File,
     io::BufReader,
     path::PathBuf,
@@ -15,6 +16,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tracing::{debug, error, info, trace};
+use tracing_indicatif::IndicatifLayer;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 #[derive(Parser, Debug, Clone)]
@@ -23,6 +25,26 @@ struct Args {
     config: PathBuf,
     #[arg(long = "comment", value_name = "COMMENT")]
     comment: Option<String>, // TODO: Add args for selecting solvers and test sets
+    #[arg(
+        short = 's',
+        long = "solver",
+        value_name = "SOLVER",
+        help = "solver that should be used in benchmark (default: all)"
+    )]
+    solvers: Option<Vec<String>>,
+    #[arg(
+        short = 't',
+        long = "test",
+        value_name = "TEST",
+        help = "test set that should be used in benchmark (default: all)"
+    )]
+    tests: Option<Vec<String>>,
+    #[arg(
+        short = 'p',
+        long = "indicatif",
+        help = "Use indicatif progress logging"
+    )]
+    indicatif: bool,
 }
 
 fn main() -> Result<(), ConfigErrors> {
@@ -33,20 +55,30 @@ fn main() -> Result<(), ConfigErrors> {
     let args = Args::parse();
 
     // Configure a custom event formatter and registry
-    tracing_subscriber::registry()
-        .with(
-            EnvFilter::try_from_default_env()
-                .or_else(|_| EnvFilter::try_new("info"))
-                .unwrap(),
-        )
-        .with(
-            fmt::layer()
-                // required for good rayon debugging
-                .with_thread_ids(true)
-                .with_thread_names(false)
-                .compact(),
-        )
-        .init();
+    let registry = tracing_subscriber::registry().with(
+        EnvFilter::try_from_default_env()
+            .or_else(|_| EnvFilter::try_new("info"))
+            .unwrap(),
+    );
+
+    if args.indicatif {
+        let indicatif_layer = IndicatifLayer::new();
+
+        registry
+            .with(tracing_subscriber::fmt::layer().with_writer(indicatif_layer.get_stderr_writer()))
+            .with(indicatif_layer)
+            .init();
+    } else {
+        registry
+            .with(
+                fmt::layer()
+                    // required for good rayon debugging
+                    .with_thread_ids(true)
+                    .with_thread_names(false)
+                    .compact(),
+            )
+            .init();
+    };
 
     debug!("Args: {args:?}");
 
@@ -75,6 +107,31 @@ fn main() -> Result<(), ConfigErrors> {
 
         exit(1);
     };
+
+    // pre filte config solvers and test sets
+    if let Some(solvers) = args.solvers {
+        config.solvers = config
+            .solvers
+            .iter()
+            .filter(|(key, _)| !solvers.contains(&key.to_string()))
+            .fold(BTreeMap::new(), |mut acc, (key, value)| {
+                acc.insert(key.clone(), value.clone());
+
+                acc
+            });
+    }
+
+    if let Some(test_set) = args.tests {
+        config.tests = config
+            .tests
+            .iter()
+            .filter(|(key, _)| !test_set.contains(&key.to_string()))
+            .fold(BTreeMap::new(), |mut acc, (key, value)| {
+                acc.insert(key.clone(), value.clone());
+
+                acc
+            });
+    }
 
     // Check semantic structure (solver references, etc.)
     if config.preflight_checks() {
@@ -119,10 +176,10 @@ fn main() -> Result<(), ConfigErrors> {
     // with channels
 
     // pre-register all solvers and test sets in database
-    for (name, solver) in config.solvers.iter() {
+    for (name, solver) in config.solvers.iter_mut() {
         let results = connection
             .prepare_cached("select id, exec, params, ingest from solvers where name = ?")?
-            .query_map(params![name], |row| {
+            .query_map(params![name.as_str()], |row| {
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
             })?
             .try_fold(Vec::new(), |mut init, result| {
@@ -131,42 +188,52 @@ fn main() -> Result<(), ConfigErrors> {
                 Ok::<Vec<(i32, String, String, String)>, ConfigErrors>(init)
             })?;
 
-        let tx = connection.transaction()?;
-
         // check if either no solver with the name is found or none with their parameters exists
-        if results.is_empty()
-            || !results.iter().all(|result| {
-                result.1 != solver.exec.to_string_lossy()
-                    || result.2 != solver.params.join(" ")
-                    || result.3 != solver.ingest
-            })
-        {
-            tx.execute(
-                "insert into solvers values (nextval('seq_solver_id'), ?, ?, ?, ?)",
-                params![
-                    name,
-                    solver.exec.to_string_lossy(),
-                    solver.params.join(" "),
-                    solver.ingest
-                ],
-            )?;
-            info!("Created solver entry for {name}")
+        let current_params = solver.get_params();
+        let current_exec = solver.exec.to_string_lossy();
+
+        let mut found_result = false;
+
+        for (id, exec, params, ingest) in results {
+            if current_exec == exec
+                && ingest == solver.ingest.to_string()
+                && params == current_params
+            {
+                solver._id = id;
+                found_result = true;
+
+                info!(
+                    "Was able to reuse existing solver entry for {name}, id: {}",
+                    solver._id
+                );
+                break;
+            }
         }
 
-        tx.commit()?;
+        if !found_result {
+            let tx = connection.transaction()?;
+
+            solver._id = tx.query_row(
+                "insert into solvers values (nextval('seq_solver_id'), ?, ?, ?, ?) returning id",
+                params![
+                    name.as_str(),
+                    solver.exec.to_string_lossy(),
+                    solver.params.join(" "),
+                    solver.ingest.as_str()
+                ],
+                |row| row.get(0),
+            )?;
+
+            info!("Created solver entry for {name}, id: {}", solver._id);
+
+            tx.commit()?;
+        }
     }
 
-    for (name, set) in config.tests.iter() {
-        /*
-           id integer primary key default(nextval('seq_testset')),
-           timout uinteger not null,
-           name varchar not null,
-           params varchar not null,
-        * */
-
+    for (name, set) in config.tests.iter_mut() {
         let results = connection
             .prepare_cached("select id, timeout, params from test_sets where name = ?")?
-            .query_map(params![name], |row| {
+            .query_map(params![name.as_str()], |row| {
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?))
             })?
             .try_fold(Vec::new(), |mut init, result| {
@@ -175,33 +242,57 @@ fn main() -> Result<(), ConfigErrors> {
                 Ok::<Vec<(i32, u32, String)>, ConfigErrors>(init)
             })?;
 
-        let tx = connection.transaction()?;
-
         // check if either no solver with the name is found or none with their parameters exists
-        let params = set
-            .params
-            .clone()
-            .map(|params| params.join(" "))
-            .unwrap_or("".to_owned());
+        let current_params = set.get_params();
 
-        if results.is_empty()
-            || !results
-                .iter()
-                .all(|result| (result.2 != params || result.1 != set.timeout as u32))
-        {
-            tx.execute(
-                "insert into test_sets values (nextval('seq_testset'), ?, ?, ?)",
-                params![set.timeout, name, params],
-            )?;
-            info!("Created solver entry for {name}");
+        let mut found_result = false;
+
+        for (id, timeout, params) in results {
+            if timeout == set.timeout && params == current_params {
+                set._id = id;
+                found_result = true;
+
+                info!(
+                    "Was able to reuse existing test set entry for {name}, id: {}",
+                    set._id
+                );
+                break;
+            }
         }
 
-        tx.commit()?;
+        if !found_result {
+            let tx = connection.transaction()?;
+
+            set._id = tx.query_row(
+                "insert into test_sets values (nextval('seq_testset'), ?, ?, ?) returning id",
+                params![set.timeout, name.as_str(), current_params],
+                |row| row.get(0),
+            )?;
+
+            info!("Created set entry for {name}, id: {}", set._id);
+
+            tx.commit()?;
+        }
     }
 
     // collect solver and test set ids into a map for easier access during execution and ingestion
-    let solver_ids = retrieve_ids(&connection, "select id, name from solvers")?;
-    let testset_ids = retrieve_ids(&connection, "select id, name from test_sets")?;
+    // TODO: once solvers and test sets are fixed above we can just use the _id attribute
+    let solver_ids = config
+        .solvers
+        .iter()
+        .fold(BTreeMap::new(), |mut acc, (name, solver)| {
+            acc.insert(name.clone(), solver._id);
+
+            acc
+        });
+    let testset_ids = config
+        .tests
+        .iter()
+        .fold(BTreeMap::new(), |mut acc, (name, set)| {
+            acc.insert(name.clone(), set._id);
+
+            acc
+        });
     let benchmark_id = connection.query_row(
         "insert into benchmarks values (nextval('seq_benchmarks'), ?) returning id;",
         params![args.comment.unwrap_or("".to_owned())],

@@ -11,29 +11,6 @@ use crate::ingest::RunContext;
 // MID TERM: add clickhouse
 // LONG TERM: add exporter (CSV) and migrator (duckdb <-> clickhouse)
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Benchmark {
-    pub id: i32,
-    pub comment: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TestSet {
-    pub name: String,
-    pub id: i64,
-    pub params: Option<String>,
-    pub timeout: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Solver {
-    pub id: i32,
-    pub name: String,
-    pub exec: String,
-    pub params: Option<String>,
-    pub ingest: String,
-}
-
 #[derive(Serialize_repr, Deserialize_repr, PartialEq, Debug, Clone)]
 #[repr(i8)]
 pub enum Satisfiability {
@@ -59,9 +36,9 @@ pub struct TestMetrics {
 }
 
 impl TestMetrics {
-    pub fn failed(runtime: u64) -> Self {
+    pub fn failed() -> Self {
         Self {
-            runtime,
+            runtime: 0,
             conflict_literals: 0,
             propagations: 0,
             number_of_clauses: 0,
@@ -87,7 +64,11 @@ impl TestMetrics {
 
         stmt.query_row(
             params![
-                self.runtime,
+                if self.runtime == 0 {
+                    None
+                } else {
+                    Some(self.runtime)
+                },
                 self.parse_time,
                 self.satisfiable as i8,
                 self.memory_usage,
@@ -135,7 +116,7 @@ pub const SQL_SCHEMA: [&str; 8] = [
     "create table if not exists runs (
     id integer primary key default(nextval('seq_run_id')),
 
-    runtime ubigint not null,
+    runtime ubigint,
     parse_time ubigint not null,
     satisfiable tinyint not null,
     memory_usage uinteger not null,

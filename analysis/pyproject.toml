@@ -1,0 +1,18 @@
+[tool.poetry]
+name = "satan-analysis"
+version = "0.1.0"
+description = ""
+authors = []
+
+[tool.poetry.dependencies]
+python = "^3.10"
+duckdb = "^0.7.1"
+duckdb-engine = "^0.7.0"
+jupysql = "^0.7.4"
+pandas = "^2.0.1"
+notebook = "^6.5.4"
+matplotlib = "^3.7.1"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"

@@ -17,6 +17,8 @@ pub enum IngestorError {
     DeserializeIngestor(#[from] serde_yaml::Error),
     #[error("Failed to wait for a child proccess")]
     ChildError(#[from] std::io::Error),
+    #[error("Ingestor timeout")]
+    ChildTimeout,
 }
 
 #[derive(Debug, Clone)]
@@ -61,17 +63,17 @@ impl<'a> RunContext<'a> {
     ) -> Self {
         Self {
             solver: (
-                *solvers.get(&solver_name.to_string()).unwrap(),
+                *solvers.get(solver_name.as_str()).unwrap(),
                 solver_name.clone(),
             ),
-            testset: (*testsets.get(&name.to_string()).unwrap(), name.clone()),
+            testset: (*testsets.get(name.as_str()).unwrap(), name.clone()),
             benchmark,
             path: path.clone(),
         }
     }
 }
 
-pub type IngestorMap<'a> = BTreeMap<String, Ingestors<'a>>;
+pub type IngestorMap<'a> = BTreeMap<CowStr, Ingestors<'a>>;
 
 #[derive(Clone, Debug)]
 pub enum Ingestors<'a> {

@@ -57,10 +57,10 @@ executor:
 
 # Map of ingestors <name>:<ingestor parameters>
 ingest:
-  minisat:
+  cadical:
     # Type of ingestor:
     # - (wip) raw: execute script (see parameter.exec) to extract metrics
-    # - (planned) minisat: embedded extractor for minisat logs
+    # - (planned) <insert specific solver>: embedded extractor for <specific solver>
     type: raw
     # ingestor specific parameter
     parameter:
@@ -73,8 +73,10 @@ tests:
   cadical-tests:
     # references git submodule for cadical, may be a relative or absolute path
     path: ./solvers/cadical/test/cnf
-    # timeout for cadical executions in milli seconds (10000 ns = 10 s)
+    # timeout for cadical executions in milli seconds (10_000 ms = 10 s)
     timeout: 10000 
+    # number of times each test is executed (default: 1)  
+    iterations: 10
     # Glob for selecting files in path, will match all files ending with .cnf
     glob: "*.cnf"
     # TODO: Document paths and params
@@ -85,7 +87,7 @@ solvers:
     # Path to binary for executing SAT solver
     # NOTE: will be executed with: <exec> <solver params> <test set params> <test file>
     exec: <path to cadical bin>
-    # Name of ingest module (not implemented yet)
+    # Name of ingest module, see ingest.cadical above
     ingest: cadical
     # TODO: Document params
 ```

@@ -1,3 +1,6 @@
 /target
 solvers.yml
 satan.db
+.jupyter/
+.ipynb_checkpoints/
+result

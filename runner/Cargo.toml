@@ -6,19 +6,30 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-thiserror = "1.0"
+# Config, CLI and general structures
 clap = { version = "4", features = ["cargo", "derive"] }
+duckdb = { version = "0.7.1" }
+serde_repr = "0.1.12"
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
+thiserror = "1.0"
+
+# Logging
 tracing = "0.1"
+tracing-indicatif = "0.3.4"
 tracing-subscriber = { version = "0.3.16", features = ["env-filter"] }
+tracing-unwrap = "0.10.0"
+
+# For local executor/ concurrent execution
+affinity = "0.1.2"
+cowstr = { version = "1.0.0-beta1", features = [
+	"serde",
+], git = "https://git.pipapo.org/cehteh/cowstr.git" }
 globset = { version = "0.4", features = ["serde1"] }
-uuid = { version = "1", features = ["serde"] }
-rayon = "1.7.0"
 ignore = "0.4.20"
 itertools = "0.10.5"
+rayon = "1.7.0"
 wait-timeout = "0.2.0"
-affinity = "0.1.2"
-serde_repr = "0.1.12"
-duckdb = { version = "0.7.1", features = ["uuid", "bundled"] }
-cowstr = "0.13.0"
+
+[features]
+bundled = ["duckdb/bundled"]

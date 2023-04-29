@@ -31,7 +31,9 @@ impl<'a> Executors<'a> {
             "local" => Ok(Self::Local(local::LocalExecutor::load(
                 connection, config, solvers, testsets, benchmark, ingestors,
             )?)),
-            _ => Err(ConfigErrors::UnsupportedExecutor(config.executor.name)),
+            _ => Err(ConfigErrors::UnsupportedExecutor(
+                config.executor.name.to_string(),
+            )),
         }
     }
 

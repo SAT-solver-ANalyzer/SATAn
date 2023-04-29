@@ -2,6 +2,7 @@ use crate::{
     executors::ExecutorError,
     ingest::{IngestorMap, Ingestors},
 };
+use cowstr::CowStr;
 use globset::{GlobBuilder, GlobMatcher};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
@@ -11,6 +12,7 @@ use std::{
 };
 use thiserror::Error;
 use tracing::{error, warn};
+use tracing_unwrap::OptionExt;
 
 // check if a file is executable
 pub fn check_executable(path: &PathBuf) -> Result<bool, ConfigErrors> {
@@ -48,11 +50,11 @@ pub struct SolverConfig {
     // executor config, has yet to be fully structured
     pub executor: ExecutorConfig,
     // Solvers as generic executables with fixed parameters, this might be extended later on
-    pub solvers: BTreeMap<String, Solver>,
+    pub solvers: BTreeMap<CowStr, Solver>,
     // Tests as sets of test files, again only a stub for e.g., an interface of some kind
-    pub tests: BTreeMap<String, TestSet>,
+    pub tests: BTreeMap<CowStr, TestSet>,
     // Config for all ingestor related setups
-    pub ingest: BTreeMap<String, IngestorConfig>,
+    pub ingest: BTreeMap<CowStr, IngestorConfig>,
 
     #[serde(alias = "db")]
     pub database: DatabaseConfig,
@@ -69,35 +71,40 @@ pub struct DatabaseConfig {
 #[serde(deny_unknown_fields)]
 pub struct IngestorConfig {
     // Name of the selected ingestor type
-    pub name: String,
+    pub name: CowStr,
 
     // parameters for the databse that apply over all tests
     // TODO: Make this fully typed with an enum
     #[serde(default)]
-    pub parameter: BTreeMap<String, serde_yaml::Value>,
+    pub parameter: BTreeMap<CowStr, serde_yaml::Value>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutorConfig {
     // Name of the selected executor, see Executors::from_str for the selection proccess
-    pub name: String,
+    pub name: CowStr,
     // parameters for the executor that apply over all tests
     // TODO: Make this fully typed with an enum
-    pub parameter: Option<BTreeMap<String, serde_yaml::Value>>,
+    pub parameter: Option<BTreeMap<CowStr, serde_yaml::Value>>,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct TestSet {
-    pub timeout: usize,
+    pub timeout: u32,
+    #[serde(default, skip)]
+    pub _id: i32,
     #[serde(default)]
-    pub paths: Vec<String>,
-    pub glob: String,
+    pub paths: Vec<CowStr>,
+    #[serde(default = "default_iter_number")]
+    pub iterations: usize,
+    pub glob: CowStr,
     #[serde(default)]
-    pub solvers: Vec<String>,
-    pub params: Option<Vec<String>>,
-    pub path: Option<String>,
+    pub solvers: Vec<CowStr>,
+    #[serde(default)]
+    pub params: Vec<CowStr>,
+    pub path: Option<CowStr>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
@@ -105,10 +112,22 @@ pub struct TestSet {
 pub struct Solver {
     pub exec: PathBuf,
     #[serde(default)]
-    pub params: Vec<String>,
-    pub ingest: String,
+    pub params: Vec<CowStr>,
+    pub ingest: CowStr,
     #[serde(default, skip)]
     pub _id: i32,
+}
+
+impl Solver {
+    pub fn get_params(&self) -> String {
+        self.params.iter().join(" ")
+    }
+}
+
+impl TestSet {
+    pub fn get_params(&self) -> String {
+        self.params.iter().join(" ")
+    }
 }
 
 impl SolverConfig {
@@ -137,7 +156,7 @@ impl SolverConfig {
     }
 
     /// Compile all globs for the test sets
-    pub fn compile_globs(&mut self) -> Result<Vec<GlobMatcher>, Vec<(String, globset::Error)>> {
+    pub fn compile_globs(&mut self) -> Result<Vec<GlobMatcher>, Vec<(CowStr, globset::Error)>> {
         let mut errors = Vec::new();
         let mut globs = Vec::new();
 
@@ -174,7 +193,7 @@ impl SolverConfig {
         }
 
         for (name, config) in self.ingest.iter_mut() {
-            config.name = config.name.to_lowercase();
+            config.name = CowStr::from(config.name.to_lowercase());
 
             match config.name.as_str() {
                 "raw" => {
@@ -184,7 +203,7 @@ impl SolverConfig {
                         .filter(|value| value.is_string())
                         // TODO: Add proper error handling below
                         .filter(|value| {
-                            check_executable(&PathBuf::from(value.as_str().unwrap()))
+                            check_executable(&PathBuf::from(value.as_str().unwrap_or_log()))
                                 .ok()
                                 .unwrap_or(false)
                         })
@@ -276,6 +295,10 @@ impl SolverConfig {
 
         contains_error
     }
+}
+
+fn default_iter_number() -> usize {
+    1
 }
 
 fn default_database_path() -> PathBuf {
