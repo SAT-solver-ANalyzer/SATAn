@@ -31,7 +31,6 @@
             python = "python311";
             enable = true;
             preferWheels = true;
-            # overrides = ./overrides.nix;
           };
         });
       libraries = with pkgs; [
