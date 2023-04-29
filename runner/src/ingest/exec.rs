@@ -10,7 +10,7 @@ use std::{
     process::{Command, Stdio},
     time::Duration,
 };
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 use tracing_unwrap::OptionExt;
 use tracing_unwrap::ResultExt;
 use wait_timeout::ChildExt;
