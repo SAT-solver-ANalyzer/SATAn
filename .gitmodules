@@ -6,3 +6,7 @@
 	path = solvers/minisat
 	url = https://github.com/niklasso/minisat.git
 	branch = master
+[submodule "ingestors"]
+	path = ingestors
+	url = https://gitlab.cobalt.rocks/satan/ingestors.git
+	branch = main
