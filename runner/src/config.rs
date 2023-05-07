@@ -96,6 +96,7 @@ pub enum DatabaseConfig {
 #[serde(deny_unknown_fields)]
 pub enum IngestorConfig {
     Exec(ExecIngestConfig),
+    Null,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
@@ -217,12 +218,10 @@ impl SolverConfig {
         }
 
         for (name, config) in self.ingest.iter_mut() {
-            match config {
-                IngestorConfig::Exec(exec_config) => {
-                    if check_executable(&exec_config.executable) {
-                        error!("ingestor.{name}.executable must be a path to an executable file");
-                        contains_error = true;
-                    }
+            if let IngestorConfig::Exec(exec_config) = config {
+                if check_executable(&exec_config.executable) {
+                    error!("ingestor.{name}.executable must be a path to an executable file");
+                    contains_error = true;
                 }
             }
         }

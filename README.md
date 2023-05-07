@@ -16,10 +16,7 @@ Developed by Cobalt.
   - YAML, able to express executors, sets of solvers and sets of test sets (see below)
 - executors:
   - local parallel executor: Supervises locally spawned SAT solvers with a thread pool ([rayon](https://github.com/rayon-rs/rayon) based, configurable concurrency, supports thread pinning)
-    - The executor is only parallelizes the actual execution of the tests. This means that the initial process of finding the tests and preparing the data for the solvers may be bound by a single thread. This may be changed in the future but is sufficient for the current test suites.
-- ingestors:
-  - made simpel
-  - `raw`: A simple ingestor that will call a specified executable with the output of a SAT solver run and expext the extracted metrics in a KV-format
+    - The executor only parallelizes the actual execution of the tests, i.e., it is parallel on the data level. This means that the initial process of finding the tests and preparing the data for the solvers may be bound by a single thread. This may be changed in the future but is sufficient for the current test suites.
 - tests:
   - tests are grouped in tests sets and identified as files via a [glob](https://github.com/BurntSushi/ripgrep/tree/master/crates/globset) that may be searched within path(s) with [ignore](https://github.com/BurntSushi/ripgrep/tree/master/crates/ignore).
 - ingest:
@@ -83,6 +80,7 @@ database: !DuckDB
 # - Exec: A script that takes the output of the solver as stdin and produces metrics to stdout
 #   - timeout: unsigned integer -> timeout in ms for ingest script (default: 5000 ms)
 #   - executable: string -> path to ingest executable 
+# - Null: The solver outputs the TestMetrics natively in YAML as stdout
 ingest:
   cadical: !Exec
     timeout: 2000
@@ -121,22 +119,6 @@ tests:
     # params that are appended after solver params and before the test file
     params: ""
 ```
-
-
-
-## Napkin architecture drawing
-
-> Open for changes etc. at any time.
-> NOTE:
-> - The store for metrics may be one of DuckDB, Clickhouse or maybe something else that fits the data structure.
-> - The executor is part of the runner and only one executor maybe active for one runner.
-
-<center>
-
-![](https://nextcloud.cobalt.rocks/s/DFywjjrLXb4kj5x/download/Untitled-2023-04-18-2045%281%29.png)
-
-</center>
-
 
 ## Logo attribution
 

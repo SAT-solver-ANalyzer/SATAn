@@ -30,6 +30,7 @@ impl<'a> ExecIngestor<'a> {
                 timeout: Duration::from_millis(config.timeout),
                 params: Cow::from(OsStr::new(config.params.as_str().clone()).to_owned()),
             }),
+            _ => unreachable!()
         }
     }
 

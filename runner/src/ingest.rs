@@ -7,6 +7,7 @@ use crate::{
 use cowstr::CowStr;
 use std::{borrow::Cow, collections::BTreeMap, path::Path};
 use thiserror::Error;
+use tracing::error;
 
 #[derive(Debug, Error)]
 pub enum IngestorError {
@@ -57,12 +58,14 @@ pub type IngestorMap<'a> = BTreeMap<CowStr, Ingestors<'a>>;
 #[derive(Clone, Debug)]
 pub enum Ingestors<'a> {
     Exec(exec::ExecIngestor<'a>),
+    Null,
 }
 
 impl Ingestors<'_> {
     // TODO: Abstract below into a trait
     pub fn load(config: &IngestorConfig) -> Result<Self, ConfigErrors> {
         match config {
+            IngestorConfig::Null => Ok(Self::Null),
             IngestorConfig::Exec { .. } => {
                 exec::ExecIngestor::load(config).map(|exec| Ingestors::Exec(exec))
             }
@@ -73,6 +76,14 @@ impl Ingestors<'_> {
     pub fn ingest(&self, output: RunOutput) -> Result<TestMetrics, IngestorError> {
         match self {
             Self::Exec(ingestor) => ingestor.ingest(output),
+            Self::Null => match serde_yaml::from_str(&output.stdout) {
+                Ok(metrics) => Ok(metrics),
+                Err(error) => {
+                    error!(error = ?error, "Failed to deserialize metrics for null ingestor");
+
+                    Err(IngestorError::DeserializeIngestor(error))
+                }
+            },
         }
     }
 }
