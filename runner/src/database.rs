@@ -1,15 +1,27 @@
+pub mod batched;
+#[cfg(feature = "clickhouse")]
+pub mod clickhouse;
+pub mod duckdb;
+#[cfg(feature = "rusqlite")]
+pub mod sqlite;
 pub mod util;
 
-use duckdb::params;
+use std::{fmt::Debug, path::PathBuf};
+
+use crate::config::{DatabaseConfig, SolverConfig};
+use cowstr::CowStr;
 use serde::{Deserialize, Serialize};
 use serde_repr::*;
-use std::sync::{Arc, Mutex};
+use thiserror::Error;
 
-use crate::ingest::RunContext;
+use self::batched::BatchedConnection;
 
-// TODO: Factor out duckdb adapter -> wrap conn in enum
 // MID TERM: add clickhouse
 // LONG TERM: add exporter (CSV) and migrator (duckdb <-> clickhouse)
+
+// Alias for all database IDs for benchmarks, solvers and testsets
+// This might be upped to an i64 if the demand ever arises
+pub type ID = i32;
 
 #[derive(Serialize_repr, Deserialize_repr, PartialEq, Debug, Clone)]
 #[repr(i8)]
@@ -35,6 +47,100 @@ pub struct TestMetrics {
     pub number_of_clauses: u32,
 }
 
+#[derive(Debug, Error)]
+pub enum ConnectionError {
+    #[error("DuckDB adapter error")]
+    DuckDB(duckdb::DuckDBError),
+    #[cfg_attr(feature = "rusqlite", error("SQLite adapter error"))]
+    #[cfg(feature = "rusqlite")]
+    SQLite(rusqlite::Error),
+    #[error("Invalid adapter configuration")]
+    ConfigError,
+}
+
+#[derive(Debug)]
+pub enum StorageAdapters {
+    DuckDB(duckdb::SharedConnection),
+    #[cfg(feature = "rusqlite")]
+    SQLite(sqlite::SharedConnection),
+    DuckDBBatched(batched::BatchedConnection),
+    #[cfg(feature = "clickhouse")]
+    ClickHouse(clickhouse::CHConnection),
+}
+
+/// Trait abstracting the interface to a database
+impl StorageAdapters {
+    /// Insert a single run output entry
+    pub fn store(
+        &self,
+        metrics: TestMetrics,
+        solver: CowStr,
+        test_set: CowStr,
+        target: &PathBuf,
+    ) -> Result<ID, ConnectionError> {
+        match self {
+            Self::DuckDB(shared_connection) => {
+                shared_connection.store(metrics, solver, test_set, target)
+            }
+            Self::DuckDBBatched(shared_connection) => {
+                shared_connection.store(metrics, solver, test_set, target)
+            }
+            Self::SQLite(shared_connection) => {
+                shared_connection.store(metrics, solver, test_set, target)
+            }
+            #[cfg(feature = "clickhouse")]
+            Self::ClickHouse { .. } => todo!(),
+        }
+    }
+
+    /// Close the connection and ensure consistency (i.e., finish batched inserts)
+    pub fn close(self) -> Result<(), ConnectionError> {
+        match self {
+            Self::DuckDB(shared_connection) => shared_connection.close(),
+            Self::SQLite(shared_connection) => shared_connection.close(),
+            Self::DuckDBBatched(shared_connection) => shared_connection.close(),
+            #[cfg(feature = "clickhouse")]
+            Self::ClickHouse { .. } => todo!(),
+        }
+    }
+
+    /// Estabilish a connection to the specified database
+    pub fn load(config: &DatabaseConfig) -> Result<Self, ConnectionError> {
+        match config {
+            DatabaseConfig::DuckDB { .. } => {
+                duckdb::SharedConnection::load(config).map(Self::DuckDB)
+            }
+            DatabaseConfig::SQLite { .. } => {
+                sqlite::SharedConnection::load(config).map(Self::SQLite)
+            }
+            DatabaseConfig::Batched { .. } => {
+                BatchedConnection::load(config).map(Self::DuckDBBatched)
+            }
+            #[cfg(feature = "clickhouse")]
+            DatabaseConfig::ClickHouse { .. } => todo!(),
+        }
+    }
+
+    /// Do any initialization, if applicable, like loading SQL schemas and creating solver/tests
+    /// entries
+    pub fn init(
+        &mut self,
+        config: &SolverConfig,
+        benchmark: Option<ID>,
+        comment: Option<String>,
+    ) -> Result<(), ConnectionError> {
+        match self {
+            Self::DuckDB(shared_connection) => shared_connection.init(config, benchmark, comment),
+            Self::DuckDBBatched(shared_connection) => {
+                shared_connection.init(config, benchmark, comment)
+            }
+            Self::SQLite(shared_connection) => shared_connection.init(config, benchmark, comment),
+            #[cfg(feature = "clickhouse")]
+            Self::ClickHouse { .. } => todo!(),
+        }
+    }
+}
+
 impl TestMetrics {
     pub fn failed() -> Self {
         Self {
@@ -50,90 +156,4 @@ impl TestMetrics {
             memory_usage: 0,
         }
     }
-
-    pub fn insert(
-        self,
-        tx: &mut duckdb::Transaction,
-        context: RunContext,
-    ) -> Result<i32, duckdb::Error> {
-        let mut stmt = tx.prepare_cached(
-            "insert into runs values
-                (nextval('seq_run_id'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                returning id",
-        )?;
-
-        stmt.query_row(
-            params![
-                if self.runtime == 0 {
-                    None
-                } else {
-                    Some(self.runtime)
-                },
-                self.parse_time,
-                self.satisfiable as i8,
-                self.memory_usage,
-                self.restarts,
-                self.conflicts,
-                self.propagations,
-                self.conflict_literals,
-                self.number_of_variables,
-                self.number_of_clauses,
-                context.path.to_string_lossy().as_ref(),
-                context.solver.0,
-                context.testset.0,
-                context.benchmark
-            ],
-            |row| row.get(0),
-        )
-    }
 }
-
-// TODO: Document below, maybe add some kind of migration utility
-// ref: https://duckdb.org/docs/sql/statements/create_table.html
-//      https://duckdb.org/docs/sql/data_types/overview
-pub const SQL_SCHEMA: [&str; 8] = [
-    "create sequence if not exists seq_benchmarks start 1 no cycle;",
-    "create table if not exists benchmarks (
-    id integer primary key default(nextval('seq_benchmarks')),
-    comment varchar
-);",
-    "create sequence if not exists seq_testset start 1 no cycle;",
-    "create table if not exists test_sets (
-    id integer primary key default(nextval('seq_testset')),
-    timeout uinteger not null,
-    name varchar not null,
-    params varchar not null,
-);",
-    "create sequence if not exists seq_solver_id start 1 no cycle;",
-    "create table if not exists solvers (
-    id integer primary key default(nextval('seq_solver_id')),
-    name varchar not null,
-    exec varchar not null,
-    params varchar not null,
-    ingest varchar not null
-);",
-    "create sequence if not exists seq_run_id start 1 no cycle;",
-    "create table if not exists runs (
-    id integer primary key default(nextval('seq_run_id')),
-
-    runtime ubigint,
-    parse_time ubigint not null,
-    satisfiable tinyint not null,
-    memory_usage uinteger not null,
-    restarts uinteger not null,
-    conflicts uinteger not null,
-    propagations uinteger not null,
-   
-	conflict_literals uinteger not null,
-	number_of_variables uinteger not null,
-    number_of_clauses uinteger not null,
-    target string not null,
-
-    solver integer not null references solvers (id),
-    test integer not null references test_sets (id),
-    benchmark integer not null references benchmarks (id)
-);",
-];
-pub const SQL_SCHEMA_NUMBER: usize = SQL_SCHEMA.len();
-
-pub type Connection = Arc<Mutex<duckdb::Connection>>;

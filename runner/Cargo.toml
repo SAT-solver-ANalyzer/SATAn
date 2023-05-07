@@ -14,9 +14,16 @@ serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
 thiserror = "1.0"
 
+# ClickHouse storage adapter
+clickhouse = { version = "0.11.3", optional = true, features = ["test-util"] }
+http = { version = "0.2", optional = true }
+http-serde = { version = "1.1", optional = true }
+
+# SQLite Storage adapter
+rusqlite = { version = "0.29.0", optional = true }
+
 # Logging
 tracing = "0.1"
-tracing-indicatif = "0.3.4"
 tracing-subscriber = { version = "0.3.16", features = ["env-filter"] }
 tracing-unwrap = "0.10.0"
 
@@ -30,6 +37,12 @@ ignore = "0.4.20"
 itertools = "0.10.5"
 rayon = "1.7.0"
 wait-timeout = "0.2.0"
+parking_lot = { version = "0.12.1", features = ["arc_lock"] }
 
 [features]
-bundled = ["duckdb/bundled"]
+bundled-duckdb = ["duckdb/bundled"]
+bundled-sqlite = ["rusqlite/bundled"]
+rusqlite = ["dep:rusqlite"]
+clickhouse = ["dep:clickhouse", "dep:http", "dep:http-serde"]
+clickhouse-lz4 = ["clickhouse/lz4"]
+default = ["rusqlite"]

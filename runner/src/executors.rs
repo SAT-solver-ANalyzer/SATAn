@@ -1,8 +1,10 @@
+mod jobs;
 mod local;
+mod slurm;
 
 use crate::{
-    config::{ConfigErrors, SolverConfig},
-    database::{util::IDMap, Connection},
+    config::{ConfigErrors, ExecutorConfig, SolverConfig},
+    database::{ConnectionError, StorageAdapters},
     ingest::{IngestorError, IngestorMap},
 };
 use thiserror::Error;
@@ -11,35 +13,33 @@ use thiserror::Error;
 pub enum ExecutorError {
     #[error("Ingest step failed")]
     IngestError(#[from] IngestorError),
+    #[error("Metric storage failed")]
+    ConnectionError(#[from] ConnectionError),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum Executors<'a> {
     Local(local::LocalExecutor<'a>),
+    Slurm(slurm::SlurmExecutor),
 }
 
 impl<'a> Executors<'a> {
     pub fn load(
-        connection: Connection,
+        connection: StorageAdapters,
         config: SolverConfig,
         ingestors: IngestorMap<'a>,
-        solvers: IDMap,
-        testsets: IDMap,
-        benchmark: i32,
     ) -> Result<Self, ConfigErrors> {
-        match config.executor.name.as_str() {
-            "local" => Ok(Self::Local(local::LocalExecutor::load(
-                connection, config, solvers, testsets, benchmark, ingestors,
+        match config.executor {
+            ExecutorConfig::Local { .. } => Ok(Self::Local(local::LocalExecutor::load(
+                connection, config, ingestors,
             )?)),
-            _ => Err(ConfigErrors::UnsupportedExecutor(
-                config.executor.name.to_string(),
-            )),
         }
     }
 
-    pub fn execute(&mut self) -> Result<(), ExecutorError> {
+    pub fn execute(self) -> Result<(), ExecutorError> {
         match self {
             Self::Local(executor) => executor.execute(),
+            Self::Slurm { .. } => todo!(),
         }
     }
 }

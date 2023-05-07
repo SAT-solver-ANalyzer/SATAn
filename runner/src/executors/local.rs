@@ -1,8 +1,8 @@
 use super::ExecutorError;
 use crate::{
-    config::SolverConfig,
-    database::{util::IDMap, Connection, TestMetrics},
-    ingest::{IngestorMap, RunContext, RunOutput},
+    config::{ExecutorConfig, SolverConfig},
+    database::{StorageAdapters, TestMetrics},
+    ingest::{IngestorMap, RunOutput},
 };
 use affinity::{get_core_num, set_thread_affinity};
 use cowstr::CowStr;
@@ -27,39 +27,30 @@ use wait_timeout::ChildExt;
 const ATOMIC_ORDERING: Ordering = Ordering::SeqCst;
 
 /// Executor that works on a local rayon-backed thread pool
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct LocalExecutor<'a> {
-    benchmark: i32,
     config: SolverConfig,
-    connection: Connection,
-    solvers: IDMap,
-    testsets: IDMap,
+    connection: StorageAdapters,
     ingestors: IngestorMap<'a>,
 }
 
 impl<'a> LocalExecutor<'a> {
     /// create a new LocalExecutor instance
     pub fn load(
-        connection: Connection,
+        connection: StorageAdapters,
         config: SolverConfig,
-        solvers: IDMap,
-        testsets: IDMap,
-        benchmark: i32,
         ingestors: IngestorMap<'a>,
     ) -> Result<Self, ExecutorError> {
         Ok(Self {
             connection,
             config,
             ingestors,
-            benchmark,
-            solvers,
-            testsets,
         })
     }
 
     /// execute jobs concurrently with a thread pool
     #[instrument(skip(self), level = "info")]
-    pub fn execute(&mut self) -> Result<(), ExecutorError> {
+    pub fn execute(mut self) -> Result<(), ExecutorError> {
         // pre compile all globs into matchers
         // NOTE: These are kept seperate from `config` to move them in the final map
         let globs = match self.config.compile_globs() {
@@ -74,26 +65,20 @@ impl<'a> LocalExecutor<'a> {
         };
 
         // setup custom global thread pool
-        let mut builder = ThreadPoolBuilder::new();
+        match self.config.executor {
+            ExecutorConfig::Local {
+                mut threads,
+                pinned,
+            } => {
+                if threads == 0 {
+                    warn!("0 threads for thread pool are not possible, falling back to number of CPUs");
 
-        let thread_number = if let Some(Some(threads)) = self
-            .config
-            .executor
-            .parameter
-            .as_ref()
-            .map(|parameters| parameters.get("threads"))
-        {
-            if let Some(Ok(thread_number)) = threads.as_u64().map(usize::try_from) {
-                if thread_number == 0 {
-                    error!("0 threads for thread pool are not possible, falling back to number of CPUs");
-
-                    get_core_num()
-                } else {
-                    thread_number
+                    threads = get_core_num();
                 }
-            } else if let Some(threads) = threads.as_str() {
-                let core_num = get_core_num();
-                if threads == "pinned" {
+
+                let mut builder = ThreadPoolBuilder::new();
+
+                if pinned {
                     info!("Pinning threads to logical CPUs");
 
                     // TODO: Add config option for fine grained pinning control, this is a late
@@ -101,7 +86,7 @@ impl<'a> LocalExecutor<'a> {
 
                     // cores are spread over all threads, this is done by pinning threads to CPU from high ->
                     // low via CPU affinity
-                    let free_cores = AtomicUsize::new(core_num - 1);
+                    let free_cores = AtomicUsize::new(threads - 1);
                     builder = builder.start_handler(move |thread_handle| {
                         let selected_core = free_cores.fetch_sub(1, ATOMIC_ORDERING);
 
@@ -110,21 +95,11 @@ impl<'a> LocalExecutor<'a> {
                     });
                 }
 
-                core_num
-            } else {
-                error!("{threads:?} is not a valid value for executor.params with local executor");
+                builder.num_threads(threads).build_global().unwrap_or_log();
 
-                get_core_num()
+                debug!("Building thread pool with {threads} threads");
             }
-        } else {
-            get_core_num()
-        };
-
-        builder
-            .num_threads(thread_number)
-            .build_global()
-            .unwrap_or_log();
-        debug!("Building thread pool with {thread_number} threads");
+        }
 
         // general counters to provide a progress bar
         let total = AtomicU64::new(0);
@@ -158,7 +133,8 @@ impl<'a> LocalExecutor<'a> {
                         // TODO: Add a warning in the docs for this
                         Ok(path) => Some(path),
                         Err(e) => {
-                            warn!("Failed to search for tests for test: {e}");
+                            warn!(error = ?e, "Failed to search for tests for test: {e}");
+
                             None
                         }
                     })
@@ -186,9 +162,9 @@ impl<'a> LocalExecutor<'a> {
                 let span = span!(
                     Level::INFO,
                     "threadpool-execution",
-                    testset = name.as_str(),
-                    solver = solver_name.as_str(),
-                    file = file.to_string_lossy().as_ref()
+                    testset = %name,
+                    solver = %solver_name,
+                    file = %file.to_string_lossy()
                 );
 
                 let _enter = span.enter();
@@ -240,65 +216,39 @@ impl<'a> LocalExecutor<'a> {
                                     .read_to_string(&mut output.stderr)
                                     .expect("Failed to read stderr");
 
-                                debug!("Finished in {} ms | status: {}", output.runtime, status);
-                                debug!(test = name.to_string(), solver = solver_name.to_string());
-
-                                let context = RunContext::new(
-                                    file.clone(),
-                                    &solver_name,
-                                    &name,
-                                    &self.solvers,
-                                    &self.testsets,
-                                    self.benchmark,
+                                debug!(
+                                    test = %name,
+                                    solver = %solver_name,
+                                    "Finished in {} ms | status: {}",
+                                    output.runtime,
+                                    status
                                 );
 
                                 match self.ingestors.get(&solver.ingest).unwrap().ingest(output) {
                                     Ok(metrics) => {
-                                        let mut lock = match self.connection.lock() {
-                                            Ok(guard) => guard,
-                                            Err(e) => {
-                                                error!("Failed to acquire connection guard: {e}");
-                                                errors.fetch_add(1, ATOMIC_ORDERING);
-
-                                                continue;
-                                            }
-                                        };
                                         debug!("Inserting {metrics:?}...");
-                                        let mut tx = match lock.transaction() {
-                                            Ok(tx) => tx,
-                                            Err(e) => {
-                                                error!("Failed to acquire transaction: {e}");
-                                                errors.fetch_add(1, ATOMIC_ORDERING);
 
-                                                continue;
-                                            }
-                                        };
-
-                                        match metrics.insert(&mut tx, context) {
+                                        match self.connection.store(
+                                            metrics,
+                                            solver_name.clone(),
+                                            name.clone(),
+                                            &file.to_path_buf(),
+                                        ) {
                                             Ok(id) => {
-                                                debug!("Saving run {}...", id);
-                                                if let Err(e) = tx.commit() {
-                                                    error!("Failed to commit run {id}: {e}");
-                                                    errors.fetch_add(1, ATOMIC_ORDERING);
-                                                }
+                                                debug!("Saved run {}", id);
                                             }
                                             Err(e) => {
-                                                error!("Failed to insert metric: {e}");
+                                                error!(error = ?e, "Failed to insert metric: {e}");
                                                 errors.fetch_add(1, ATOMIC_ORDERING);
-
-                                                if let Err(e) = tx.rollback() {
-                                                    error!("Failed to rollback tx for ingest: {e}");
-                                                };
                                             }
                                         };
                                     }
                                     Err(e) => {
-                                        let lossy_filename = file.to_string_lossy();
-
                                         error!(
-                                            solver = solver_name.as_str(),
-                                            set = name.as_str(),
-                                            file = lossy_filename.as_ref(),
+                                            solver = %solver_name,
+                                            set = %name,
+                                            file = %file.to_string_lossy(),
+                                            error = ?e,
                                             "Failed to ingest record: {e}"
                                         );
 
@@ -311,58 +261,32 @@ impl<'a> LocalExecutor<'a> {
                                 child.kill().unwrap_or_log();
 
                                 debug!(
-                                    message = "Killed due to timeout",
-                                    test = name.to_string(),
-                                    solver = solver_name.to_string(),
-                                    file = file.to_string_lossy().as_ref()
-                                );
-                                let mut lock = match self.connection.lock() {
-                                    Ok(guard) => guard,
-                                    Err(e) => {
-                                        error!("Failed to acquire connection guard: {e}");
-                                        errors.fetch_add(1, ATOMIC_ORDERING);
-
-                                        continue;
-                                    }
-                                };
-                                let mut tx = match lock.transaction() {
-                                    Ok(tx) => tx,
-                                    Err(e) => {
-                                        error!("Failed to acquire transaction: {e}");
-                                        errors.fetch_add(1, ATOMIC_ORDERING);
-
-                                        continue;
-                                    }
-                                };
-
-                                let context = RunContext::new(
-                                    file.clone(),
-                                    &solver_name,
-                                    &name,
-                                    &self.solvers,
-                                    &self.testsets,
-                                    self.benchmark,
+                                    set = %name,
+                                    solver = %solver_name,
+                                    file = %file.to_string_lossy(),
+                                    "Killed due to timeout"
                                 );
 
                                 // NOTE: This is guaranteed by the timeout in the config being limited
                                 // in size
-                                match TestMetrics::failed().insert(&mut tx, context) {
+                                match self.connection.store(
+                                    TestMetrics::failed(),
+                                    solver_name.clone(),
+                                    name.clone(),
+                                    &file.to_path_buf(),
+                                ) {
                                     Ok(id) => {
-                                        debug!("Saving run {}...", id);
-                                        if let Err(e) = tx.commit() {
-                                            error!("Failed to commit run {id}: {e}");
-                                            errors.fetch_add(1, ATOMIC_ORDERING);
-                                        }
+                                        debug!(id = id, "Saved run {id}");
                                     }
                                     Err(e) => {
-                                        error!("Failed to insert metric: {e}");
+                                        error!(error = ?e, "Failed to insert metric: {e}");
                                         errors.fetch_add(1, ATOMIC_ORDERING);
                                     }
                                 };
                             }
                         },
                         Err(e) => {
-                            warn!("Failed to spawn child process: {e}");
+                            warn!(error = ?e, "Failed to spawn child process: {e}");
 
                             errors.fetch_add(1, ATOMIC_ORDERING);
                         }
@@ -384,6 +308,8 @@ impl<'a> LocalExecutor<'a> {
 
                 processed.fetch_add(1, ATOMIC_ORDERING);
             });
+
+        self.connection.close()?;
 
         // finish the whole thing with a small confirmation message
         info!(

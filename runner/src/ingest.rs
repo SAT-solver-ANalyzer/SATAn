@@ -2,7 +2,7 @@ pub mod exec;
 
 use crate::{
     config::{ConfigErrors, IngestorConfig},
-    database::{util::IDMap, TestMetrics},
+    database::TestMetrics,
 };
 use cowstr::CowStr;
 use std::{borrow::Cow, collections::BTreeMap, path::Path};
@@ -46,52 +46,33 @@ impl RunOutput {
 /// container for information related to running a solver
 /// e.g., solver id, benchmark id, test set id, ...
 pub struct RunContext<'a> {
-    pub benchmark: i32,
     pub path: Cow<'a, Path>,
+    pub benchmark: i32,
     pub solver: (i32, CowStr),
     pub testset: (i32, CowStr),
-}
-
-impl<'a> RunContext<'a> {
-    pub fn new(
-        path: Cow<'a, Path>,
-        solver_name: &CowStr,
-        name: &CowStr,
-        solvers: &IDMap,
-        testsets: &IDMap,
-        benchmark: i32,
-    ) -> Self {
-        Self {
-            solver: (
-                *solvers.get(solver_name.as_str()).unwrap(),
-                solver_name.clone(),
-            ),
-            testset: (*testsets.get(name.as_str()).unwrap(), name.clone()),
-            benchmark,
-            path: path.clone(),
-        }
-    }
 }
 
 pub type IngestorMap<'a> = BTreeMap<CowStr, Ingestors<'a>>;
 
 #[derive(Clone, Debug)]
 pub enum Ingestors<'a> {
-    Raw(exec::RawIngestor<'a>),
+    Exec(exec::ExecIngestor<'a>),
 }
 
 impl Ingestors<'_> {
+    // TODO: Abstract below into a trait
     pub fn load(config: &IngestorConfig) -> Result<Self, ConfigErrors> {
-        match config.name.to_lowercase().as_str() {
-            "raw" => exec::RawIngestor::load(config).map(Ingestors::Raw),
-            _ => Err(ConfigErrors::FailedLoadIngestor),
+        match config {
+            IngestorConfig::Exec { .. } => {
+                exec::ExecIngestor::load(config).map(|exec| Ingestors::Exec(exec))
+            }
         }
     }
 
     #[tracing::instrument(level = "debug")]
     pub fn ingest(&self, output: RunOutput) -> Result<TestMetrics, IngestorError> {
         match self {
-            Self::Raw(ingestor) => ingestor.ingest(output),
+            Self::Exec(ingestor) => ingestor.ingest(output),
         }
     }
 }

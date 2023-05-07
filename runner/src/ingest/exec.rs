@@ -10,54 +10,26 @@ use std::{
     process::{Command, Stdio},
     time::Duration,
 };
-use tracing::{debug, error, warn};
+use tracing::{debug, error, trace, warn};
 use tracing_unwrap::OptionExt;
 use tracing_unwrap::ResultExt;
 use wait_timeout::ChildExt;
 
 #[derive(Debug, Clone)]
-pub struct RawIngestor<'a> {
+pub struct ExecIngestor<'a> {
     pub ingestor: Cow<'a, OsStr>,
     pub params: Cow<'a, OsStr>,
     pub timeout: Duration,
 }
 
-impl<'a> RawIngestor<'a> {
+impl<'a> ExecIngestor<'a> {
     pub fn load(config: &IngestorConfig) -> Result<Self, ConfigErrors> {
-        if let Some(Some(exec)) = config.parameter.get("exec").map(|exec| exec.as_str()) {
-            let timeout = Duration::from_millis(match config.parameter.get("timeout") {
-                Some(timeout_value) => match timeout_value.as_u64() {
-                    Some(value) => value,
-                    None => {
-                        warn!("Ingestor timeout must be a natural number");
-                        return Err(ConfigErrors::FailedLoadIngestor);
-                    }
-                },
-                None => 2000,
-            });
-
-            let params = OsStr::new(match config.parameter.get("params") {
-                Some(value) => match value.as_str() {
-                    Some(value) => value,
-                    None => {
-                        warn!("Ingestor params must be a string");
-                        return Err(ConfigErrors::FailedLoadIngestor);
-                    }
-                },
-                None => "",
-            })
-            .to_owned();
-
-            Ok(Self {
-                ingestor: Cow::from(OsStr::new(exec).to_owned()),
-                timeout,
-                // TODO: make below prettier
-                params: Cow::from(params),
-            })
-        } else {
-            error!("The raw executor requires ingestor.exec to be a str pointing to the path of the ingestor script");
-
-            Err(ConfigErrors::FailedLoadIngestor)
+        match config {
+            IngestorConfig::Exec(config) => Ok(Self {
+                ingestor: Cow::from(config.executable.as_os_str().to_owned()),
+                timeout: Duration::from_millis(config.timeout),
+                params: Cow::from(OsStr::new(config.params.as_str().clone()).to_owned()),
+            }),
         }
     }
 
@@ -118,7 +90,7 @@ impl<'a> RawIngestor<'a> {
                     .read_to_string(&mut buffer)
                     .expect("Failed to read output");
 
-                debug!("Output from ingestor: {buffer}");
+                trace!("Output from ingestor: {buffer}");
 
                 match serde_yaml::from_str::<TestMetrics>(&buffer) {
                     Ok(metrics) => Ok(metrics),
