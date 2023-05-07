@@ -10,7 +10,7 @@
   };
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-22.11";
     flake-utils.url = "github:numtide/flake-utils";
     rust-overlay.url = "github:oxalica/rust-overlay";
     jupyenv.url = "github:tweag/jupyenv";
@@ -35,18 +35,18 @@
         });
       libraries = with pkgs; [
         duckdb
+        openssl_3
+        sqlite
       ];
 
-      packages = with pkgs; [
+      packages = with pkgs; libraries ++ [
         pkg-config
-        openssl_3
         minisat
         cadical
         mold
-        duckdb
         (rust-bin.stable.latest.default.override {
           extensions = [ "rust-src" ];
-          targets = [ "wasm32-unknown-unknown" ];
+          targets = [ "x86_64-unknown-linux-musl" ];
         })
       ];
     in

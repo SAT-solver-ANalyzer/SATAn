@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#! /usr/bin/env python3
 # Script for extracting metrics from cadical output
 # This is written to be moderately fast while staying very readable
 # TODO: Add handling for invalid input files

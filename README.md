@@ -25,9 +25,17 @@ Developed by Cobalt.
 - ingest:
   - (WIP) minisat and cadical are planned as a first step
 
-## Building
+## Runtime behaviour (WIP)
 
-> TODO: Document how to use nix with the nix devshell
+### Runner
+
+1. Read & Deserialize config
+2. Check for consistency etc., so called pre-flight checks
+3. Construct Tasks, i.e., figure out what tests exists and map them to solvers
+4. Start executing 
+5. (if neccessary), teardown of stateful components like database connections
+
+## Building
 
 ### Runner
 
@@ -35,68 +43,92 @@ Required dependencies:
 
 - A rust toolchain (MSRV: `stable` - 1.68.2), recommeded: [rustup](https://rustup.rs/)
 - A C compiler (symlinked to `cc`) for bundled [DuckDB](https://github.com/duckdb/duckdb), needs to be in `PATH` while `cargo` builds the runner
+- OpenSSL development file, usually found in package repositories as `libssl-dev` or `openssl-devel`
+- (optional) DuckDB header files, may be found in your package repositories as `duckdb-dev`
 
 Building:
 
-- To create a debug build (placed in `target/debug/satan-runner`): `cargo b cargo b --package satan-runner`
+- To create a debug build with the system DuckDB (placed in `target/debug/satan-runner`): `cargo b cargo b --package satan-runner`
+- To create a debug build (placed in `target/debug/satan-runner`): `cargo b cargo b --package satan-runner --features bundled-duckdb`
 - To create a release, i.e. optimized, build (placed in `target/release/satan-runner`): `cargo b cargo b --package satan-runner --release`
+- To create a release with the system DuckDB, i.e. optimized, build (placed in `target/release/satan-runner`): `cargo b cargo b --package satan-runner --release --features bundled-duckdb`
 
 ## Config
 
-> TODO: Document all options
+> The configuration is done in [YAML](https://yaml.org/), other languages may also be supported in the future.
 
 ```yaml
-executor:
-  # Name of used executor, only "local" is supported for now
-  name: local
-  parameter:
-    # This can be either:
-    # a number specifying the number of threads in the thread pool (default: number of logical CPUS)
-    # "pinned": -> number of logical CPUs but pinned with sched_setaffinity (linux only)
-    threads: pinned
+# Executor, variant select with YAML tag:
+# Support variants:
+# - Local
+#   - pinned: bool -> pin threads to logical CPUs (default: false)
+#   - threads: integer -> number of threads in tread pool (default: number of logical CPUs) }
+# - Slurm { todo!() }
+executor: !Local
+  pinned: true
 
-# Map of ingestors <name>:<ingestor parameters>
+# Configuration for metric storage driver, the same tag handling applies here too
+# - DuckDB: Uses DuckDB, an sqlite-like file based database, for storage. Recommended for local setups.
+#           This driver is, like SQLite, limited to one write at time and works with an internal Mutex.
+#   - path: string -> path to duckdb file
+# - Batched: Uses the DuckDB driver with a buffer, intended for local setups with medium throughput
+#   - path: string -> path to duckdb file
+#   - size: unsigned integer -> size of buffer (default: 100)
+# - Clickhouse: Uses ClickHouse as a full DBMS for metric storage. Recommended for distributed setups.
+#   - { todo!() }
+database: !DuckDB
+  path: satan.db
+
+# Configuration for ingest driver, the same tag handling applies here too
+# - Exec: A script that takes the output of the solver as stdin and produces metrics to stdout
+#   - timeout: unsigned integer -> timeout in ms for ingest script (default: 5000 ms)
+#   - executable: string -> path to ingest executable 
 ingest:
-  cadical:
-    # Type of ingestor:
-    # - (wip) raw: execute script (see parameter.exec) to extract metrics
-    # - (planned) <insert specific solver>: embedded extractor for <specific solver>
-    type: raw
-    # ingestor specific parameter
-    parameter:
-      # Path to an executable that extracts the strucutred log metrics
-      # from the stdout/stderr of the solver run
-      exec: <path to executable>
-
-# Map of test sets <name>:<test set attrbutes>
-tests:
-  cadical-tests:
-    # references git submodule for cadical, may be a relative or absolute path
-    path: ./solvers/cadical/test/cnf
-    # timeout for cadical executions in milli seconds (10_000 ms = 10 s)
-    timeout: 10000 
-    # number of times each test is executed (default: 1)  
-    iterations: 10
-    # Glob for selecting files in path, will match all files ending with .cnf
-    glob: "*.cnf"
-    # TODO: Document paths and params
+  cadical: !Exec
+    timeout: 2000
+    executable:  ./solvers/cadical.py
+  minisat: !Exec
+    timeout: 2000
+    executable:  ./solvers/minisat.py
 
 # Map of solvers <name>:<test set attrbutes>
 solvers:
   cadical:
     # Path to binary for executing SAT solver
     # NOTE: will be executed with: <exec> <solver params> <test set params> <test file>
-    exec: <path to cadical bin>
+    exec: <path to solver bin>
     # Name of ingest module, see ingest.cadical above
     ingest: cadical
-    # TODO: Document params
+    # parameters that are applied after the solver params and before the test set params
+    params: ""
+
+# Map of test sets <name>:<test set attrbutes>
+tests:
+  cadical-tests:
+    # reference to directory (can be used with(out) paths) 
+    path: ./solvers/cadical/test/cnf
+    # reference to directories to search
+    paths:
+      - ./solvers/cadical/test/cnf
+      - ./solvers/cadical/test/cnf-2
+    # unsigned integer -> timeout for test executions in ms
+    # will overwrite solver timeout for this set of tests (optional)
+    timeout: 10000 
+    # number of times each test is executed (default: 1)  
+    iterations: 10
+    # Glob for selecting files in path(s)
+    glob: "*.cnf"
+    # params that are appended after solver params and before the test file
+    params: ""
 ```
+
+
 
 ## Napkin architecture drawing
 
 > Open for changes etc. at any time.
 > NOTE:
-> - The datastore for metrics may be one of DuckDB, (maybe) Clickhouse or maybe something else that fits the data structure.
+> - The store for metrics may be one of DuckDB, Clickhouse or maybe something else that fits the data structure.
 > - The executor is part of the runner and only one executor maybe active for one runner.
 
 <center>
