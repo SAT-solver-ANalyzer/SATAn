@@ -84,10 +84,10 @@ database: !DuckDB
 ingest:
   cadical: !Exec
     timeout: 2000
-    executable:  ./solvers/cadical.py
+    executable:  ./ingestors/cadical.py
   minisat: !Exec
     timeout: 2000
-    executable:  ./solvers/minisat.py
+    executable:  ./ingestors/minisat.py
 
 # Map of solvers <name>:<test set attrbutes>
 solvers:
