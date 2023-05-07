@@ -68,6 +68,8 @@ executor: !Local
 # - DuckDB: Uses DuckDB, an sqlite-like file based database, for storage. Recommended for local setups.
 #           This driver is, like SQLite, limited to one write at time and works with an internal Mutex.
 #   - path: string -> path to duckdb file
+# - SQLite: Uses SQLite for storage. Recommended for local setups with high iteration count.
+#   - path: string -> path to sqlite file
 # - Batched: Uses the DuckDB driver with a buffer, intended for local setups with medium throughput
 #   - path: string -> path to duckdb file
 #   - size: unsigned integer -> size of buffer (default: 100)
