@@ -9,7 +9,8 @@ Developed by Cobalt.
 ## Current state
 
 - metrics database:
-  - (wip, let's see how it goes) duckdb
+  - duckdb (direct and batched)
+  - sqlite 
   - (planned, most likely in clustered scenarios) clickhouse OR postgresql
   - (planned-feature): Merging, i.e., take multiple metric sets and compile into single database
 - config:
@@ -17,8 +18,10 @@ Developed by Cobalt.
 - executors:
   - local parallel executor: Supervises locally spawned SAT solvers with a thread pool ([rayon](https://github.com/rayon-rs/rayon) based, configurable concurrency, supports thread pinning)
     - The executor only parallelizes the actual execution of the tests, i.e., it is parallel on the data level. This means that the initial process of finding the tests and preparing the data for the solvers may be bound by a single thread. This may be changed in the future but is sufficient for the current test suites.
+    - (planned, wip) SLURM
 - tests:
   - tests are grouped in tests sets and identified as files via a [glob](https://github.com/BurntSushi/ripgrep/tree/master/crates/globset) that may be searched within path(s) with [ignore](https://github.com/BurntSushi/ripgrep/tree/master/crates/ignore).
+  - GBD collector coming soon-ish
 - ingest:
   - (WIP) minisat and cadical are planned as a first step
 
