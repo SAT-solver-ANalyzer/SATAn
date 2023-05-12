@@ -10,7 +10,7 @@ Developed by Cobalt.
 
 - metrics database:
   - duckdb (direct and batched)
-  - sqlite 
+  - sqlite
   - (planned, most likely in clustered scenarios) clickhouse OR postgresql
   - (planned-feature): Merging, i.e., take multiple metric sets and compile into single database
 - config:
@@ -32,7 +32,7 @@ Developed by Cobalt.
 1. Read & Deserialize config
 2. Check for consistency etc., so called pre-flight checks
 3. Construct Tasks, i.e., figure out what tests exists and map them to solvers
-4. Start executing 
+4. Start executing
 5. (if neccessary), teardown of stateful components like database connections
 
 ## Building
@@ -63,7 +63,11 @@ Building:
 # - Local
 #   - pinned: bool -> pin threads to logical CPUs (default: false)
 #   - threads: integer -> number of threads in tread pool (default: number of logical CPUs) }
-# - Slurm { todo!() }
+# - Distributed: A wrapper for distributed usage of the local executor
+#   - synchronization: tagged enum (see below) ->
+#      - Coordinated: Elect a leader runner and let it coordinate work over MPI, this node may also process tasks at the same time
+#      - FilesystemLocks: Use SQLite with filesystem locks to coordinate the work queue. This method relies on the filesystem to handle file locking and employs a temporary SQLite database for distributing work
+#        - path: string -> path to SQLite database (must be prepared beforehand AND be available on all compute nodes)
 executor: !Local
   pinned: true
 
@@ -81,10 +85,13 @@ executor: !Local
 database: !DuckDB
   path: satan.db
 
+# Wether to insert metrics directly after ingesting or as a bulk insert after all tests are executed
+delayed: false
+
 # Configuration for ingest driver, the same tag handling applies here too
 # - Exec: A script that takes the output of the solver as stdin and produces metrics to stdout
 #   - timeout: unsigned integer -> timeout in ms for ingest script (default: 5000 ms)
-#   - executable: string -> path to ingest executable 
+#   - executable: string -> path to ingest executable
 # - Null: The solver outputs the TestMetrics natively in YAML as stdout
 ingest:
   cadical: !Exec
@@ -108,19 +115,23 @@ solvers:
 # Map of test sets <name>:<test set attrbutes>
 tests:
   cadical-tests:
-    # reference to directory (can be used with(out) paths) 
-    path: ./solvers/cadical/test/cnf
-    # reference to directories to search
-    paths:
-      - ./solvers/cadical/test/cnf
-      - ./solvers/cadical/test/cnf-2
+    # Collectors: Components that retrieve and prepare the DIMACS test files
+    # - Glob: Collect files from a directory by a glob (old default)
+    # - GBD: Collect tests from a GBD compatible web host and save as local files (todo)
+    collector: !Glob
+      # Glob for selecting files in path(s)
+      glob: "*.cnf"
+      # reference to directory (can be used with(out) paths)
+      path: ./solvers/cadical/test/cnf
+      # reference to directories to search
+      paths:
+        - ./solvers/cadical/test/cnf
+        - ./solvers/cadical/test/cnf-2
     # unsigned integer -> timeout for test executions in ms
     # will overwrite solver timeout for this set of tests (optional)
-    timeout: 10000 
-    # number of times each test is executed (default: 1)  
+    timeout: 10000
+    # number of times each test is executed (default: 1)
     iterations: 10
-    # Glob for selecting files in path(s)
-    glob: "*.cnf"
     # params that are appended after solver params and before the test file
     params: ""
 ```

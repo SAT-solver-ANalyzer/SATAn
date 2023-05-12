@@ -1,7 +1,7 @@
-use super::{batched::MetricsBundle, util::IDMap, TestMetrics, ID};
+use super::{util::IDMap, MetricsBundle, TestMetrics, ID};
 use crate::{
-    config::SolverConfig,
-    database::{ConnectionError, DatabaseConfig},
+    config::{ConnectionConfig, SolverConfig},
+    database::ConnectionError,
 };
 use cowstr::CowStr;
 use parking_lot::{lock_api::ArcMutexGuard, FairMutex, RawFairMutex};
@@ -54,7 +54,7 @@ impl SharedConnection {
         Arc::try_unwrap(self.0).unwrap_or_log().into_inner().close()
     }
 
-    pub fn load(config: &DatabaseConfig) -> Result<Self, ConnectionError> {
+    pub fn load(config: &ConnectionConfig) -> Result<Self, ConnectionError> {
         Ok(Self::new(InnerConnection::load(config)?))
     }
 
@@ -66,6 +66,13 @@ impl SharedConnection {
         target: &PathBuf,
     ) -> Result<i32, ConnectionError> {
         self.lock().store(metrics, solver, test_set, target)
+    }
+
+    pub fn store_iter<'a, I: Iterator<Item = MetricsBundle>>(
+        &self,
+        metrics: I,
+    ) -> Result<(), ConnectionError> {
+        self.lock().store_iter(metrics)
     }
 }
 
@@ -243,9 +250,9 @@ impl InnerConnection {
         Ok(())
     }
 
-    pub fn load(config: &DatabaseConfig) -> Result<Self, ConnectionError> {
+    pub fn load(config: &ConnectionConfig) -> Result<Self, ConnectionError> {
         match config {
-            DatabaseConfig::SQLite { path } => {
+            ConnectionConfig::SQLite { path } => {
                 let connection = Connection::open(path)?;
 
                 Ok(Self {
@@ -302,15 +309,19 @@ impl InnerConnection {
             .map_err(|err| ConnectionError::SQLite(err))
     }
 
-    pub fn store_iter<'a, I: Iterator<Item = &'a MetricsBundle>>(
-        &mut self,
+    pub fn store_iter<'a, I: Iterator<Item = MetricsBundle>>(
+        &self,
         mut metrics: I,
     ) -> Result<(), ConnectionError> {
         let mut counter = 0;
 
+        // NOTE: We can guarantee that no nested transactions are present due to only having one
+        // connection at a time.
+        let mut tx = self.connection.unchecked_transaction()?;
+        tx.set_drop_behavior(rusqlite::DropBehavior::Rollback);
         metrics.try_for_each(|bundle| -> Result<(), ConnectionError> {
             counter += 1;
-            self.connection
+            let id: i32 = tx
                 .prepare_cached(
                     "insert into runs
                 (runtime, parse_time, satisfiable, memory_usage, restarts, conflicts,
@@ -319,24 +330,31 @@ impl InnerConnection {
                 values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 returning id",
                 )?
-                .execute(params![
-                    bundle.metrics.runtime,
-                    bundle.metrics.parse_time,
-                    bundle.metrics.satisfiable.clone() as i8,
-                    bundle.metrics.memory_usage,
-                    bundle.metrics.restarts,
-                    bundle.metrics.conflicts,
-                    bundle.metrics.propagations,
-                    bundle.metrics.number_of_variables,
-                    bundle.metrics.number_of_clauses,
-                    bundle.target.to_string_lossy().as_ref(),
-                    self.solvers.get(&bundle.solver).unwrap(),
-                    self.test_sets.get(&bundle.test_set).unwrap(),
-                    self.benchmark
-                ])?;
+                .query_row(
+                    params![
+                        bundle.metrics.runtime,
+                        bundle.metrics.parse_time,
+                        bundle.metrics.satisfiable.clone() as i8,
+                        bundle.metrics.memory_usage,
+                        bundle.metrics.restarts,
+                        bundle.metrics.conflicts,
+                        bundle.metrics.propagations,
+                        bundle.metrics.conflict_literals,
+                        bundle.metrics.number_of_variables,
+                        bundle.metrics.number_of_clauses,
+                        bundle.target.to_string_lossy().as_ref(),
+                        self.solvers.get(&bundle.solver).unwrap(),
+                        self.test_sets.get(&bundle.test_set).unwrap(),
+                        self.benchmark
+                    ],
+                    |row| row.get(0),
+                )?;
+
+            debug!(id = id, "Inserted entry");
 
             Ok(())
         })?;
+        tx.commit()?;
 
         info!("Stored {counter} entries");
 

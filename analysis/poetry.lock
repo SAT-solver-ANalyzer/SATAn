@@ -206,6 +206,21 @@ webencodings = "*"
 css = ["tinycss2 (>=1.1.0,<1.2)"]
 
 [[package]]
+name = "catppuccin-matplotlib"
+version = "0.4"
+description = "📊 Soothing pastel theme for matplotlib"
+category = "main"
+optional = false
+python-versions = "*"
+files = [
+    {file = "catppuccin-matplotlib-0.4.tar.gz", hash = "sha256:736880aa56b3591896f4438058ce3484ab2072d20255e21237ca0cdb50c214d6"},
+    {file = "catppuccin_matplotlib-0.4-py3-none-any.whl", hash = "sha256:308b8c1e7f9dcb1cf13a2a7e0d57cd9d240deea63fc3b9b697a4c88c27c65479"},
+]
+
+[package.dependencies]
+matplotlib = "*"
+
+[[package]]
 name = "certifi"
 version = "2022.12.7"
 description = "Python package for providing Mozilla's CA Bundle."
@@ -2693,4 +2708,4 @@ test = ["websockets"]
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.10"
-content-hash = "28761cef1da50e44c6533ff918cce00cf85cede1b834625724ed807852f9fa7e"
+content-hash = "ff72d728886397656353c61d36400f581a498c7c1019add3ac6a4ff8222b91de"

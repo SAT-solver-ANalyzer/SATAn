@@ -1,7 +1,11 @@
+mod collector;
 mod config;
 mod database;
 mod executors;
 mod ingest;
+
+#[cfg(feature = "distributed")]
+mod sync;
 
 use clap::{crate_name, crate_version, Args, Parser, Subcommand};
 use config::ConfigErrors;
@@ -43,7 +47,7 @@ pub struct ExecuteArgs {
         value_name = "COMMENT",
         help = "Comment that should be added to the benchmark"
     )]
-    comment: Option<String>, // TODO: Add args for selecting solvers and test sets
+    comment: Option<String>,
     #[arg(
         short = 's',
         long = "solver",
@@ -154,7 +158,7 @@ fn main() -> Result<(), ConfigErrors> {
 
             debug!("Config: {config:?}");
 
-            let mut connection = match database::StorageAdapters::load(&config.database) {
+            let mut connection = match database::ConnectionAdapters::load(&config.database) {
                 Ok(connection) => connection,
                 Err(error) => {
                     error!(error = ?error, "Failed to load connection: {error}");
@@ -173,17 +177,31 @@ fn main() -> Result<(), ConfigErrors> {
             let cloned_config = config.clone();
             let ingestors = match cloned_config.load_ingestors() {
                 Ok(ingestors) => ingestors,
-                Err(e) => {
-                    error!("Failed to initialize ingestors after preflight checks: {e}");
+                Err(error) => {
+                    error!(
+                        error = ?error,
+                        "Preflight checks failed on ingestors: {error}"
+                    );
                     exit(1)
                 }
             };
 
+            let mut collectors = match config.collectors() {
+                Ok(collectors) => collectors,
+                Err((name, error)) => {
+                    error!(error = ?error, "Failed to compile collector for {name}: {error}");
+                    exit(1);
+                }
+            };
+            collectors
+                .iter_mut()
+                .try_for_each(|collector| collector.prepare())?;
+
             // select an executor and throw the queue at it
-            match executors::Executors::load(connection, config, ingestors) {
+            match executors::Executors::load(connection, config, ingestors, collectors) {
                 Ok(executor) => match executor.execute() {
                     Ok(()) => info!("Finished execution"),
-                    Err(e) => error!("Executor failed: {e}"),
+                    Err(error) => error!(error = ?error, "Executor failed: {error}"),
                 },
                 Err(executor) => error!("Executor {executor} is not supported",),
             }

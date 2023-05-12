@@ -1,15 +1,13 @@
 use crate::{
+    collector::TestCollector,
+    database::ConnectionError,
     executors::ExecutorError,
     ingest::{IngestorMap, Ingestors},
 };
 use cowstr::CowStr;
-use globset::{GlobBuilder, GlobMatcher};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::BTreeMap, fs::File, io::Error, os::unix::fs::MetadataExt, path::PathBuf,
-    str::FromStr,
-};
+use std::{collections::BTreeMap, fs::File, io::Error, os::unix::fs::MetadataExt, path::PathBuf};
 use thiserror::Error;
 use tracing::{debug, error, warn};
 
@@ -39,8 +37,8 @@ pub enum ConfigErrors {
     FailedLoadIngestor,
     #[error("Metadata not found")]
     MetadataNotFound(#[from] Error),
-    #[error("Database query failed")]
-    DatabaseError(#[from] duckdb::Error),
+    #[error("Database Connection failed")]
+    DatabaseError(#[from] ConnectionError),
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
@@ -57,11 +55,50 @@ pub struct SolverConfig {
 
     #[serde(alias = "db")]
     pub database: DatabaseConfig,
+
+    #[serde(default)]
+    pub delayed: bool,
+
+    #[serde(alias = "logs", default)]
+    pub tracing: TracingConfig,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
-pub enum DatabaseConfig {
+pub enum TracingConfig {
+    OpenTelemetry,
+    Stdio,
+}
+
+impl Default for TracingConfig {
+    fn default() -> Self {
+        Self::Stdio
+    }
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct DatabaseConfig {
+    #[serde(default)]
+    pub delayed: bool,
+    pub batched: Option<BatchConfig>,
+
+    #[cfg_attr(any(feature = "duckdb", feature = "duckdb"), serde(default))]
+    pub connection: ConnectionConfig,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct BatchConfig {
+    #[serde(default = "default_batch_number")]
+    pub size: u32,
+    pub timeout: Option<u32>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
+pub enum ConnectionConfig {
+    #[cfg(feature = "duckdb")]
     DuckDB {
         #[serde(default)]
         path: PathBuf,
@@ -71,12 +108,6 @@ pub enum DatabaseConfig {
     SQLite {
         #[serde(default)]
         path: PathBuf,
-    },
-
-    Batched {
-        path: PathBuf,
-        #[serde(default = "default_batch_number")]
-        size: u32,
     },
 
     #[cfg(feature = "clickhouse")]
@@ -116,22 +147,40 @@ pub enum ExecutorConfig {
         threads: usize,
         pinned: bool,
     },
+
+    #[cfg(feature = "distributed")]
+    Distributed {
+        // type of work coordination
+        synchronization: crate::sync::SynchronizationTypes,
+        // wether to use the local executor internally to perform distributed tasks
+        local: bool,
+    },
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub enum CollectorConfig {
+    Glob {
+        #[serde(default)]
+        paths: Vec<CowStr>,
+        glob: CowStr,
+        #[serde(default)]
+        path: Option<CowStr>,
+    },
+    GDB {},
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct TestSet {
     pub timeout: u32,
-    #[serde(default)]
-    pub paths: Vec<CowStr>,
+    pub collector: CollectorConfig,
     #[serde(default = "default_iter_number")]
     pub iterations: usize,
-    pub glob: CowStr,
     #[serde(default)]
     pub solvers: Vec<CowStr>,
     #[serde(default)]
     pub params: Vec<CowStr>,
-    pub path: Option<CowStr>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
@@ -180,30 +229,18 @@ impl SolverConfig {
         }
     }
 
-    /// Compile all globs for the test sets
-    pub fn compile_globs(&mut self) -> Result<Vec<GlobMatcher>, Vec<(CowStr, globset::Error)>> {
-        let mut errors = Vec::new();
-        let mut globs = Vec::new();
+    pub fn collectors(&mut self) -> Result<Vec<TestCollector>, (CowStr, ConfigErrors)> {
+        self.tests.iter().try_fold(
+            Vec::new(),
+            |mut acc, (name, test)| match TestCollector::new(&test.collector) {
+                Ok(collector) => {
+                    acc.push(collector);
 
-        self.tests.iter().for_each(|(name, test)| {
-            match GlobBuilder::new(&test.glob)
-                .build()
-                .map(|glob| glob.compile_matcher())
-            {
-                Ok(matcher) => {
-                    globs.push(matcher);
+                    Ok(acc)
                 }
-                Err(error) => {
-                    errors.push((name.clone(), error));
-                }
-            }
-        });
-
-        if errors.is_empty() {
-            Ok(globs)
-        } else {
-            Err(errors)
-        }
+                Err(error) => Err((name.clone(), error)),
+            },
+        )
     }
 
     pub fn preflight_checks(&mut self) -> bool {
@@ -270,15 +307,26 @@ impl SolverConfig {
                 }
             }
 
-            if value.path.is_none() && value.paths.is_empty() {
-                error!("Test {test} contains neither 'path' nor 'paths' a test can't be a NOP");
-                contains_error = true;
-            } else if let Some(ref path) = value.path {
-                if !value.paths.is_empty() {
-                    warn!("Test {test} contains both 'path' and 'paths'. This will be treated as if 'path' is a member of 'paths'");
-                } else {
-                    // merge path into paths if neccessary
-                    value.paths.push(path.clone());
+            match &mut value.collector {
+                CollectorConfig::GDB {} => todo!(),
+                CollectorConfig::Glob {
+                    glob: _,
+                    path,
+                    paths,
+                } => {
+                    if path.is_none() && paths.is_empty() {
+                        error!(
+                            "Test {test} contains neither 'path' nor 'paths' a test can't be a NOP"
+                        );
+                        contains_error = true;
+                    } else if let Some(ref path) = path {
+                        if !paths.is_empty() {
+                            warn!("Test {test} contains both 'path' and 'paths'. This will be treated as if 'path' is a member of 'paths'");
+                        } else {
+                            // merge path into paths if neccessary
+                            paths.push(path.clone());
+                        }
+                    }
                 }
             }
 
@@ -288,9 +336,13 @@ impl SolverConfig {
             }
         }
 
-        match &self.database {
+        if self.database.delayed && self.database.batched.is_some() {
+            warn!("Enabling both database.delayed and database.batched is not recommended");
+        }
+
+        match &self.database.connection {
             #[cfg(feature = "rusqlite")]
-            DatabaseConfig::SQLite { path } => {
+            ConnectionConfig::SQLite { path } => {
                 if !path.is_file() && path.exists() {
                     error!(
                         "database.path for SQLite needs to be either regular file or an empty path"
@@ -300,7 +352,8 @@ impl SolverConfig {
                 }
             }
 
-            DatabaseConfig::DuckDB { path } | DatabaseConfig::Batched { path, size: _ } => {
+            #[cfg(feature = "duckdb")]
+            ConnectionConfig::DuckDB { path } => {
                 if !path.is_file() && path.exists() {
                     error!(
                         "database.path for DuckDB needs to be either regular file or an empty path"
@@ -311,7 +364,7 @@ impl SolverConfig {
             }
 
             #[cfg(feature = "clickhouse")]
-            DatabaseConfig::ClickHouse {
+            ConnectionConfig::ClickHouse {
                 server: _,
                 database: _,
                 user,
@@ -350,10 +403,19 @@ fn default_iter_number() -> usize {
     1
 }
 
-impl Default for DatabaseConfig {
+#[cfg(any(feature = "rusqlite", feature = "duckdb"))]
+impl Default for ConnectionConfig {
+    #[cfg(feature = "rusqlite")]
+    fn default() -> Self {
+        Self::SQLite {
+            path: "./satan.db".into(),
+        }
+    }
+
+    #[cfg(all(not(feature = "rusqlite"), feature = "duckdb"))]
     fn default() -> Self {
         Self::DuckDB {
-            path: PathBuf::from_str("satan.db").unwrap(),
+            path: "./satan.db".into(),
         }
     }
 }

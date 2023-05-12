@@ -62,7 +62,6 @@ pub enum Ingestors<'a> {
 }
 
 impl Ingestors<'_> {
-    // TODO: Abstract below into a trait
     pub fn load(config: &IngestorConfig) -> Result<Self, ConfigErrors> {
         match config {
             IngestorConfig::Null => Ok(Self::Null),

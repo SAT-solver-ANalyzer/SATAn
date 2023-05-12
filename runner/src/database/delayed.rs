@@ -1,43 +1,41 @@
 use super::{ConnectionAdapters, ConnectionError, MetricsBundle, TestMetrics, ID};
-use crate::config::{BatchConfig, SolverConfig};
+use crate::config::SolverConfig;
 use cowstr::CowStr;
 use parking_lot::FairMutex;
 use std::{path::PathBuf, sync::Arc};
 use tracing_unwrap::ResultExt;
 
 #[derive(Debug)]
-pub struct BatchedConnection {
-    connection: Box<ConnectionAdapters>,
+pub struct DelayedConnection {
+    adapter: Box<ConnectionAdapters>,
     buffer: Arc<FairMutex<Vec<MetricsBundle>>>,
-    size: u32,
 }
 
-impl BatchedConnection {
-    pub fn load(config: &BatchConfig, connection: ConnectionAdapters) -> Self {
-        Self {
-            buffer: Arc::new(FairMutex::new(Vec::new())),
-            size: config.size,
-            connection: Box::new(connection),
-        }
-    }
-
+impl DelayedConnection {
     pub fn init(
         &mut self,
         config: &SolverConfig,
         benchmark: Option<ID>,
         comment: Option<String>,
     ) -> Result<(), ConnectionError> {
-        self.connection.init(config, benchmark, comment)
+        self.adapter.init(config, benchmark, comment)
+    }
+
+    pub fn load(connection: ConnectionAdapters) -> Self {
+        Self {
+            buffer: Arc::new(FairMutex::new(Vec::new())),
+            adapter: Box::new(connection),
+        }
     }
 
     pub fn close(self) -> Result<(), ConnectionError> {
         let buffer = Arc::try_unwrap(self.buffer).unwrap_or_log().into_inner();
 
         if buffer.len() > 0 {
-            self.connection.store_iter(buffer.into_iter())?;
+            self.adapter.store_iter(buffer.into_iter())?;
         }
 
-        self.connection.close()
+        self.adapter.close()
     }
 
     pub fn store(
@@ -47,20 +45,12 @@ impl BatchedConnection {
         test_set: CowStr,
         target: &PathBuf,
     ) -> Result<i32, ConnectionError> {
-        let mut buffer = self.buffer.lock_arc();
-
-        buffer.push(MetricsBundle {
+        self.buffer.lock_arc().push(MetricsBundle {
             metrics,
             solver,
             test_set,
-            target: target.clone(),
+            target: target.to_path_buf(),
         });
-
-        if buffer.len() as u32 == self.size {
-            self.connection.store_iter(buffer.drain(0..))?;
-
-            buffer.clear();
-        }
 
         Ok(i32::MIN)
     }

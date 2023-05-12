@@ -12,6 +12,7 @@ jupysql = "^0.7.4"
 pandas = "^2.0.1"
 notebook = "^6.5.4"
 matplotlib = "^3.7.1"
+catppuccin-matplotlib = "^0.4"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]

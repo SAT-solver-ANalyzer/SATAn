@@ -1,19 +1,18 @@
 use super::ExecutorError;
 use crate::{
+    collector::TestCollector,
     config::{ExecutorConfig, SolverConfig},
-    database::{StorageAdapters, TestMetrics},
+    database::{ConnectionAdapters, TestMetrics},
     ingest::{IngestorMap, RunOutput},
 };
 use affinity::{get_core_num, set_thread_affinity};
 use cowstr::CowStr;
-use ignore::WalkBuilder;
-use itertools::{iproduct, Itertools};
+use itertools::iproduct;
 use rayon::{prelude::*, ThreadPoolBuilder};
 use std::{
-    borrow::Cow,
     ffi::OsStr,
     io::Read,
-    process::{exit, Command, Stdio},
+    process::{Command, Stdio},
     sync::{
         atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc,
@@ -30,40 +29,30 @@ const ATOMIC_ORDERING: Ordering = Ordering::SeqCst;
 #[derive(Debug)]
 pub struct LocalExecutor<'a> {
     config: SolverConfig,
-    connection: StorageAdapters,
+    connection: ConnectionAdapters,
     ingestors: IngestorMap<'a>,
+    collectors: Vec<TestCollector>,
 }
 
 impl<'a> LocalExecutor<'a> {
     /// create a new LocalExecutor instance
     pub fn load(
-        connection: StorageAdapters,
+        connection: ConnectionAdapters,
         config: SolverConfig,
         ingestors: IngestorMap<'a>,
+        collectors: Vec<TestCollector>,
     ) -> Result<Self, ExecutorError> {
         Ok(Self {
             connection,
             config,
             ingestors,
+            collectors,
         })
     }
 
     /// execute jobs concurrently with a thread pool
     #[instrument(skip(self), level = "info")]
-    pub fn execute(mut self) -> Result<(), ExecutorError> {
-        // pre compile all globs into matchers
-        // NOTE: These are kept seperate from `config` to move them in the final map
-        let globs = match self.config.compile_globs() {
-            Ok(globs) => globs,
-            Err(compile_errors) => {
-                for (name, err) in compile_errors {
-                    error!("Failed to compile glob for {name}: {err}")
-                }
-
-                exit(1)
-            }
-        };
-
+    pub fn execute(self) -> Result<(), ExecutorError> {
         // setup custom global thread pool
         match self.config.executor {
             ExecutorConfig::Local {
@@ -99,6 +88,9 @@ impl<'a> LocalExecutor<'a> {
 
                 debug!("Building thread pool with {threads} threads");
             }
+
+            #[cfg(feature = "distributed")]
+            ExecutorConfig::Distributed { .. } => unreachable!(),
         }
 
         // general counters to provide a progress bar
@@ -111,37 +103,16 @@ impl<'a> LocalExecutor<'a> {
         self.config
             .tests
             .iter()
-            .zip(globs.into_iter())
+            .zip(self.collectors.into_iter())
             // ensure set.solvers is always defined
             // Wrap Data in clonable, thread-safe types
-            .map(|((name, set), glob)| (CowStr::from(name.as_str()), Arc::from(set), glob))
-            .flat_map(|(name, set, glob)| {
+            .map(|((name, set), collector)| {
+                (CowStr::from(name.as_str()), Arc::from(set), collector)
+            })
+            .flat_map(|(name, set, collector)| {
                 // collect list of paths by recursively searching with glob filtering
-                let cloned_paths = set.paths.clone();
-                let (first, others) = cloned_paths.split_first().unwrap_or_log();
-                let mut builder = WalkBuilder::new(first.as_str());
-
-                debug!("Filtering with glob: {glob:?}");
-                // add other paths
-                others.iter().for_each(|path| {
-                    builder.add(path.as_str());
-                });
-
-                let paths = builder
-                    .build()
-                    .filter_map(|path| match path {
-                        // TODO: Add a warning in the docs for this
-                        Ok(path) => Some(path),
-                        Err(e) => {
-                            warn!(error = ?e, "Failed to search for tests for test: {e}");
-
-                            None
-                        }
-                    })
-                    .filter(|entry| glob.is_match(entry.path()))
-                    .map(|path| Cow::from(path.into_path()))
-                    .collect_vec();
-
+                // TODO: add better error handling below
+                let paths = collector.iter().unwrap_or_log();
                 debug!("Found paths: {paths:?}");
 
                 // increase total counter for progress bar
@@ -166,7 +137,6 @@ impl<'a> LocalExecutor<'a> {
                     solver = %solver_name,
                     file = %file.to_string_lossy()
                 );
-
                 let _enter = span.enter();
 
                 debug!(

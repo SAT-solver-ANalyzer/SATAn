@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 # Config, CLI and general structures
 clap = { version = "4", features = ["cargo", "derive"] }
-duckdb = { version = "0.7.1" }
+duckdb = { version = "0.7.1", optional = true }
 serde_repr = "0.1.12"
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
@@ -16,8 +16,8 @@ thiserror = "1.0"
 
 # ClickHouse storage adapter
 clickhouse = { version = "0.11.3", optional = true, features = ["test-util"] }
-http = { version = "0.2", optional = true }
-http-serde = { version = "1.1", optional = true }
+http = { version = "0.2" }
+http-serde = { version = "1.1" }
 
 # SQLite Storage adapter
 rusqlite = { version = "0.29.0", optional = true }
@@ -43,6 +43,8 @@ parking_lot = { version = "0.12.1", features = ["arc_lock"] }
 bundled-duckdb = ["duckdb/bundled"]
 bundled-sqlite = ["rusqlite/bundled"]
 rusqlite = ["dep:rusqlite"]
-clickhouse = ["dep:clickhouse", "dep:http", "dep:http-serde"]
+distributed = ["rusqlite"]
+duckdb = ["dep:duckdb"]
+clickhouse = ["dep:clickhouse"]
 clickhouse-lz4 = ["clickhouse/lz4"]
-default = ["rusqlite"]
+default = ["rusqlite", "distributed", "duckdb"]

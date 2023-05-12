@@ -34,9 +34,9 @@
           };
         });
       libraries = with pkgs; [
-        duckdb
-        openssl_3
-        sqlite
+        #        duckdb
+        #        openssl_3
+        #        sqlite
       ];
 
       packages = with pkgs; libraries ++ [
@@ -44,6 +44,7 @@
         minisat
         cadical
         mold
+        kissat
         (rust-bin.stable.latest.default.override {
           extensions = [ "rust-src" ];
           targets = [ "x86_64-unknown-linux-musl" ];

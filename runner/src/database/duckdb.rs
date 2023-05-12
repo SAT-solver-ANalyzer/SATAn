@@ -1,7 +1,7 @@
-use super::{batched::MetricsBundle, util::IDMap, TestMetrics, ID};
+use super::{util::IDMap, MetricsBundle, TestMetrics, ID};
 use crate::{
-    config::SolverConfig,
-    database::{ConnectionError, DatabaseConfig},
+    config::{ConnectionConfig, SolverConfig},
+    database::ConnectionError,
 };
 use cowstr::CowStr;
 use duckdb::params;
@@ -61,7 +61,7 @@ impl SharedConnection {
         Arc::try_unwrap(self.0).unwrap_or_log().into_inner().close()
     }
 
-    pub fn load(config: &DatabaseConfig) -> Result<Self, ConnectionError> {
+    pub fn load(config: &ConnectionConfig) -> Result<Self, ConnectionError> {
         Ok(Self::new(InnerConnection::load(config)?))
     }
 
@@ -73,6 +73,13 @@ impl SharedConnection {
         target: &PathBuf,
     ) -> Result<i32, ConnectionError> {
         self.lock().store(metrics, solver, test_set, target)
+    }
+
+    pub fn store_iter<'a, I: Iterator<Item = MetricsBundle>>(
+        &self,
+        metrics: I,
+    ) -> Result<(), ConnectionError> {
+        self.lock().store_iter(metrics)
     }
 }
 
@@ -257,9 +264,9 @@ impl InnerConnection {
         Ok(())
     }
 
-    pub fn load(config: &DatabaseConfig) -> Result<Self, ConnectionError> {
+    pub fn load(config: &ConnectionConfig) -> Result<Self, ConnectionError> {
         match config {
-            DatabaseConfig::DuckDB { path } | DatabaseConfig::Batched { path, size: _ } => {
+            ConnectionConfig::DuckDB { path } => {
                 let connection = duckdb::Connection::open(path)?;
 
                 Ok(Self {
@@ -320,7 +327,7 @@ impl InnerConnection {
         }
     }
 
-    pub fn store_iter<'a, I: Iterator<Item = &'a MetricsBundle>>(
+    pub fn store_iter<'a, I: Iterator<Item = MetricsBundle>>(
         &mut self,
         mut metrics: I,
     ) -> Result<(), ConnectionError> {
@@ -394,7 +401,7 @@ pub const SQL_SCHEMA: [&str; 8] = [
     restarts uinteger not null,
     conflicts uinteger not null,
     propagations uinteger not null,
-   
+
 	conflict_literals uinteger not null,
 	number_of_variables uinteger not null,
     number_of_clauses uinteger not null,
