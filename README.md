@@ -136,6 +136,9 @@ tests:
     params: ""
 ```
 
-## Logo attribution
+## Attribution
 
 The (temporary) logo is `imp` from the [Firefox Emoji](https://github.com/mozilla/fxemoji) set, [licensed](https://github.com/mozilla/fxemoji/blob/gh-pages/LICENSE.md) under [CC BY 4.0](https://github.com/mozilla/fxemoji/blob/gh-pages/LICENSE.md#creative-commons-attribution-40-international-cc-by-40) by the Mozilla Foundation (Copyright 2015).
+
+Some of the source code for the pooled connection managers was inspired by [ivanceras r2d2-sqlite crate](https://github.com/ivanceras/r2d2-sqlite).
+There was no code re-used nor borrowed however it still deserves a shoutout for the good documentation.

@@ -1,7 +1,9 @@
 /target
 solvers.yml
 satan.db
+hosts
 *.wal
+.vagrant/
 test_*.sh
 .jupyter/
 .ipynb_checkpoints/

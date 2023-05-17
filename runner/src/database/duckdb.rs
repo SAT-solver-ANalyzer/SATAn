@@ -354,7 +354,7 @@ impl InnerConnection {
                     self.test_sets.get(&bundle.test_set).unwrap(),
                     self.benchmark
                 ])
-                .map_err(|err| ConnectionError::from(err))
+                .map_err(ConnectionError::from)
         })?;
 
         drop(appender);

@@ -281,14 +281,12 @@ impl SolverConfig {
                 );
 
                 contains_error = true;
-            } else {
-                if check_executable(&solver.exec) {
-                    error!(
-                        "Solver {name} target {} is not executable, this might cause problems",
-                        solver.exec.to_string_lossy()
-                    );
-                    contains_error = true;
-                }
+            } else if check_executable(&solver.exec) {
+                error!(
+                    "Solver {name} target {} is not executable, this might cause problems",
+                    solver.exec.to_string_lossy()
+                );
+                contains_error = true;
             }
         }
 

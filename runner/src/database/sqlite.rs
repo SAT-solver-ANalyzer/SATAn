@@ -306,7 +306,7 @@ impl InnerConnection {
                 ],
                 |row| row.get(0),
             )
-            .map_err(|err| ConnectionError::SQLite(err))
+            .map_err(ConnectionError::SQLite)
     }
 
     pub fn store_iter<'a, I: Iterator<Item = MetricsBundle>>(

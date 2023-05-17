@@ -1,0 +1,20 @@
+site_name: SATAn Docs 
+
+theme:
+  name: material
+  font: false
+  plugins:
+    - offline
+
+markdown_extensions:
+   - pymdownx.details
+   - admonition
+   - pymdownx.superfences:
+      custom_fences:
+         - name: mermaid
+           class: mermaid
+           format: !!python/name:pymdownx.superfences.fence_code_format
+
+# TODO: Include mermaid from npm instead of CDN
+# extra_javascript:
+#   - <mermaid url> 

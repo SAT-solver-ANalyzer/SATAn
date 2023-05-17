@@ -33,7 +33,7 @@ impl BatchedConnection {
     pub fn close(self) -> Result<(), ConnectionError> {
         let buffer = Arc::try_unwrap(self.buffer).unwrap_or_log().into_inner();
 
-        if buffer.len() > 0 {
+        if !buffer.is_empty() {
             self.connection.store_iter(buffer.into_iter())?;
         }
 
