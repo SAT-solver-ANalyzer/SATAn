@@ -65,9 +65,7 @@ impl Ingestors<'_> {
     pub fn load(config: &IngestorConfig) -> Result<Self, ConfigErrors> {
         match config {
             IngestorConfig::Null => Ok(Self::Null),
-            IngestorConfig::Exec { .. } => {
-                exec::ExecIngestor::load(config).map(Ingestors::Exec)
-            }
+            IngestorConfig::Exec { .. } => exec::ExecIngestor::load(config).map(Ingestors::Exec),
         }
     }
 

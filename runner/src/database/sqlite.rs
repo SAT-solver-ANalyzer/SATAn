@@ -200,7 +200,7 @@ impl InnerConnection {
                 let id = self
                     .connection
                     .prepare_cached(
-                        "insert into test_sets 
+                        "insert into test_sets
                          (timeout, name, params) values (?, ?, ?)
                          returning id",
                     )?
@@ -252,16 +252,12 @@ impl InnerConnection {
 
     pub fn load(config: &ConnectionConfig) -> Result<Self, ConnectionError> {
         match config {
-            ConnectionConfig::SQLite { path } => {
-                let connection = Connection::open(path)?;
-
-                Ok(Self {
-                    connection,
-                    solvers: IDMap::new(),
-                    test_sets: IDMap::new(),
-                    benchmark: ID::MIN,
-                })
-            }
+            ConnectionConfig::SQLite { path } => Ok(Self {
+                connection: Connection::open(path)?,
+                solvers: IDMap::new(),
+                test_sets: IDMap::new(),
+                benchmark: ID::MIN,
+            }),
             _ => unreachable!(),
         }
     }
@@ -393,7 +389,7 @@ pub const SQL_SCHEMA: [&str; 4] = [
     restarts uinteger not null,
     conflicts uinteger not null,
     propagations uinteger not null,
-   
+
 	conflict_literals uinteger not null,
 	number_of_variables uinteger not null,
     number_of_clauses uinteger not null,

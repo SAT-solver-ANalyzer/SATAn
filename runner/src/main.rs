@@ -5,7 +5,7 @@ mod executors;
 mod ingest;
 
 #[cfg(feature = "distributed")]
-mod sync;
+mod distributed;
 
 use clap::{crate_name, crate_version, Args, Parser, Subcommand};
 use config::ConfigErrors;
@@ -158,7 +158,7 @@ fn main() -> Result<(), ConfigErrors> {
 
             debug!("Config: {config:?}");
 
-            let mut connection = match database::ConnectionAdapters::load(&config.database) {
+            let mut connection = match database::ConnectionAdapter::load(&config.database) {
                 Ok(connection) => connection,
                 Err(error) => {
                     error!(error = ?error, "Failed to load connection: {error}");
@@ -186,19 +186,16 @@ fn main() -> Result<(), ConfigErrors> {
                 }
             };
 
-            let mut collectors = match config.collectors() {
+            let collectors = match config.collectors() {
                 Ok(collectors) => collectors,
                 Err((name, error)) => {
                     error!(error = ?error, "Failed to compile collector for {name}: {error}");
                     exit(1);
                 }
             };
-            collectors
-                .iter_mut()
-                .try_for_each(|collector| collector.prepare())?;
 
             // select an executor and throw the queue at it
-            match executors::Executors::load(connection, config, ingestors, collectors) {
+            match executors::LocalExecutor::load(connection, config, ingestors, collectors) {
                 Ok(executor) => match executor.execute() {
                     Ok(()) => info!("Finished execution"),
                     Err(error) => error!(error = ?error, "Executor failed: {error}"),

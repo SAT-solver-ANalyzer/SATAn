@@ -1,4 +1,4 @@
-use super::{ConnectionAdapters, ConnectionError, MetricsBundle, TestMetrics, ID};
+use super::{ConnectionAdapter, ConnectionError, MetricsBundle, TestMetrics, ID};
 use crate::config::{BatchConfig, SolverConfig};
 use cowstr::CowStr;
 use parking_lot::FairMutex;
@@ -7,13 +7,13 @@ use tracing_unwrap::ResultExt;
 
 #[derive(Debug)]
 pub struct BatchedConnection {
-    connection: Box<ConnectionAdapters>,
+    connection: Box<ConnectionAdapter>,
     buffer: Arc<FairMutex<Vec<MetricsBundle>>>,
     size: u32,
 }
 
 impl BatchedConnection {
-    pub fn load(config: &BatchConfig, connection: ConnectionAdapters) -> Self {
+    pub fn load(config: &BatchConfig, connection: ConnectionAdapter) -> Self {
         Self {
             buffer: Arc::new(FairMutex::new(Vec::new())),
             size: config.size,

@@ -1,3 +1,6 @@
+pub mod mpi;
+pub mod util;
+
 /*
  * Plan for the slurm executor:
  * 1. Retrieve jobs -> turn into iterable
@@ -25,3 +28,13 @@
  * 1. Get the main strucutre for work stealing in order
  * 2. Hit the ground running -> identify the problems and go on
  */
+
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+#[derive(Deserialize, Serialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
+pub enum SynchronizationTypes {
+    Coordinated,
+    FileSystem { path: PathBuf },
+}

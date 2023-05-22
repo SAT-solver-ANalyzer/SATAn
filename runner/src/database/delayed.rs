@@ -1,4 +1,4 @@
-use super::{ConnectionAdapters, ConnectionError, MetricsBundle, TestMetrics, ID};
+use super::{ConnectionAdapter, ConnectionError, MetricsBundle, TestMetrics, ID};
 use crate::config::SolverConfig;
 use cowstr::CowStr;
 use parking_lot::FairMutex;
@@ -7,7 +7,7 @@ use tracing_unwrap::ResultExt;
 
 #[derive(Debug)]
 pub struct DelayedConnection {
-    adapter: Box<ConnectionAdapters>,
+    adapter: Box<ConnectionAdapter>,
     buffer: Arc<FairMutex<Vec<MetricsBundle>>>,
 }
 
@@ -21,7 +21,7 @@ impl DelayedConnection {
         self.adapter.init(config, benchmark, comment)
     }
 
-    pub fn load(connection: ConnectionAdapters) -> Self {
+    pub fn load(connection: ConnectionAdapter) -> Self {
         Self {
             buffer: Arc::new(FairMutex::new(Vec::new())),
             adapter: Box::new(connection),

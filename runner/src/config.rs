@@ -1,5 +1,7 @@
+#[cfg(feature = "distributed")]
+use crate::distributed::{util::prepend_hostname, SynchronizationTypes};
 use crate::{
-    collector::TestCollector,
+    collector::{Collector, CollectorMap},
     database::ConnectionError,
     executors::ExecutorError,
     ingest::{IngestorMap, Ingestors},
@@ -9,7 +11,7 @@ use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fs::File, io::Error, os::unix::fs::MetadataExt, path::PathBuf};
 use thiserror::Error;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 // check if a file is executable
 pub fn check_executable(path: &PathBuf) -> bool {
@@ -151,14 +153,13 @@ pub enum ExecutorConfig {
     #[cfg(feature = "distributed")]
     Distributed {
         // type of work coordination
-        synchronization: crate::sync::SynchronizationTypes,
-        // wether to use the local executor internally to perform distributed tasks
-        local: bool,
+        synchronization: crate::distributed::SynchronizationTypes,
     },
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
+/// Configuration for collectors
 pub enum CollectorConfig {
     Glob {
         #[serde(default)]
@@ -167,7 +168,17 @@ pub enum CollectorConfig {
         #[serde(default)]
         path: Option<CowStr>,
     },
-    GDB {},
+    Grouped {
+        // NOTE: The check if all referenced names are valid is done during preflight checks
+        // In this case Collectors are cloned and merged into a single grouped Collector
+        collectors: Vec<CowStr>,
+    },
+    GDB {
+        #[serde(with = "http_serde::uri")]
+        server: http::Uri,
+        #[serde(default)]
+        tmp_dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -229,18 +240,24 @@ impl SolverConfig {
         }
     }
 
-    pub fn collectors(&mut self) -> Result<Vec<TestCollector>, (CowStr, ConfigErrors)> {
-        self.tests.iter().try_fold(
-            Vec::new(),
-            |mut acc, (name, test)| match TestCollector::new(&test.collector) {
-                Ok(collector) => {
-                    acc.push(collector);
+    /// load, if possible, all collectors
+    pub fn collectors(&mut self) -> Result<CollectorMap, (CowStr, ConfigErrors)> {
+        let mut collectors = CollectorMap::new();
 
-                    Ok(acc)
+        for (name, config) in self.tests.iter() {
+            match Collector::load(&config.collector) {
+                Ok(ingestor) => {
+                    collectors.insert(name.clone(), ingestor);
                 }
-                Err(error) => Err((name.clone(), error)),
-            },
-        )
+                Err(e) => {
+                    error!("ingestor {name} failed to load: {e}");
+
+                    return Err((name.clone(), e));
+                }
+            };
+        }
+
+        Ok(collectors)
     }
 
     pub fn preflight_checks(&mut self) -> bool {
@@ -290,6 +307,21 @@ impl SolverConfig {
             }
         }
 
+        for (test, value) in self.tests.iter() {
+            if let CollectorConfig::Grouped { collectors } = &value.collector {
+                for collector in collectors {
+                    if !self.tests.contains_key(collector) {
+                        error!(
+                            test_set = ?test,
+                            name = %collector,
+                            "{collector} is not a valid test set, invalid reference in set {test}"
+                        );
+                        contains_error = true;
+                    }
+                }
+            }
+        }
+
         for (test, value) in self.tests.iter_mut() {
             if value.solvers.is_empty() {
                 warn!(
@@ -306,7 +338,7 @@ impl SolverConfig {
             }
 
             match &mut value.collector {
-                CollectorConfig::GDB {} => todo!(),
+                CollectorConfig::Grouped { .. } | CollectorConfig::GDB { .. } => (),
                 CollectorConfig::Glob {
                     glob: _,
                     path,
@@ -331,6 +363,21 @@ impl SolverConfig {
             if value.timeout == 0 {
                 error!("Test {test}.timeout cannot 0. This will lead to problems with evaluating some metrics.");
                 contains_error = true;
+            }
+        }
+
+        #[cfg(feature = "distributed")]
+        if let ExecutorConfig::Distributed { synchronization } = &self.executor {
+            if let SynchronizationTypes::FileSystem { .. } = synchronization {
+                match &mut self.database.connection {
+                    ConnectionConfig::SQLite { path } | ConnectionConfig::DuckDB { path } => {
+                        if let Err(error) = prepend_hostname(path) {
+                            error!(error = ?error, "Failed to prepend hostname");
+                        } else {
+                            info!("Modified SQLite/DuckDB path to be host specific");
+                        }
+                    }
+                }
             }
         }
 

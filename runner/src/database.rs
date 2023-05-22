@@ -67,7 +67,7 @@ pub enum ConnectionError {
 }
 
 #[derive(Debug)]
-pub enum ConnectionAdapters {
+pub enum ConnectionAdapter {
     #[cfg(feature = "duckdb")]
     DuckDB(duckdb::SharedConnection),
     #[cfg(feature = "rusqlite")]
@@ -79,7 +79,7 @@ pub enum ConnectionAdapters {
 }
 
 /// Trait abstracting the interface to a database
-impl ConnectionAdapters {
+impl ConnectionAdapter {
     /// Insert a single run output entry
     pub fn store(
         &self,
