@@ -37,7 +37,7 @@
             preferWheels = true;
           };
         });
-        libraries = with pkgs; [ duckdb openssl_3 sqlite ];
+        libraries = with pkgs; [ openmpi duckdb openssl_3 sqlite ];
 
         packages = with pkgs;
           libraries ++ [
@@ -78,7 +78,9 @@
               nodePackages_latest.prettier
             ];
           };
-          vm = pkgs.mkShell { buildInputs = with pkgs; [ unstable.vagrant ]; };
+          vm = pkgs.mkShell {
+            buildInputs = with pkgs; [ munge unstable.vagrant ];
+          };
         };
 
       });

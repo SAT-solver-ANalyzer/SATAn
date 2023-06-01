@@ -8,24 +8,25 @@ Developed by Cobalt.
 
 ## Current state
 
-- metrics database:
+- Metrics database:
   - duckdb (direct and batched)
-  - sqlite
-  - (planned, most likely in clustered scenarios) clickhouse OR postgresql
+  - SQLite
+  - (planned, most likely in clustered scenarios) ClickHouse OR PostgreSQL
   - (planned-feature): Merging, i.e., take multiple metric sets and compile into single database
 - config:
   - YAML, able to express executors, sets of solvers and sets of test sets (see below)
 - executors:
   - local parallel executor: Supervises locally spawned SAT solvers with a thread pool ([rayon](https://github.com/rayon-rs/rayon) based, configurable concurrency, supports thread pinning)
     - The executor only parallelizes the actual execution of the tests, i.e., it is parallel on the data level. This means that the initial process of finding the tests and preparing the data for the solvers may be bound by a single thread. This may be changed in the future but is sufficient for the current test suites.
-    - (planned, wip) SLURM
+    - (planned, WIP) SLURM
 - tests:
   - tests are grouped in tests sets and identified as files via a [glob](https://github.com/BurntSushi/ripgrep/tree/master/crates/globset) that may be searched within path(s) with [ignore](https://github.com/BurntSushi/ripgrep/tree/master/crates/ignore).
-  - GBD collector coming soon-ish
+  - Test sets that are supersets of other sets, i.e., test set c with tests from set a and b.
+  - GBD collector coming soonish
 - ingest:
   - (WIP) minisat and cadical are planned as a first step
 
-## Runtime behaviour (WIP)
+## Runtime behavior (WIP)
 
 ### Runner
 
@@ -33,7 +34,7 @@ Developed by Cobalt.
 2. Check for consistency etc., so called pre-flight checks
 3. Construct Tasks, i.e., figure out what tests exists and map them to solvers
 4. Start executing
-5. (if neccessary), teardown of stateful components like database connections
+5. (if necessary), teardown of stateful components like database connections
 
 ## Building
 
@@ -41,7 +42,7 @@ Developed by Cobalt.
 
 Required dependencies:
 
-- A rust toolchain (MSRV: `stable` - 1.68.2), recommeded: [rustup](https://rustup.rs/)
+- A rust toolchain (MSRV: `stable` - 1.68.2), recommended: [rustup](https://rustup.rs/)
 - A C compiler (symlinked to `cc`) for bundled [DuckDB](https://github.com/duckdb/duckdb), needs to be in `PATH` while `cargo` builds the runner
 - OpenSSL development file, usually found in package repositories as `libssl-dev` or `openssl-devel`
 - (optional) DuckDB header files, may be found in your package repositories as `duckdb-dev`
@@ -118,6 +119,7 @@ tests:
     # Collectors: Components that retrieve and prepare the DIMACS test files
     # - Glob: Collect files from a directory by a glob (old default)
     # - GBD: Collect tests from a GBD compatible web host and save as local files (todo)
+    # - Grouped: See below
     collector: !Glob
       # Glob for selecting files in path(s)
       glob: "*.cnf"
@@ -127,6 +129,11 @@ tests:
       paths:
         - ./solvers/cadical/test/cnf
         - ./solvers/cadical/test/cnf-2
+  grouped-cadical-tests:
+    # - Grouped: Union of collector tests (note: nested groups are not possible atm)
+    collector: !Grouped
+      collectors:
+	- cadical-tests
     # unsigned integer -> timeout for test executions in ms
     # will overwrite solver timeout for this set of tests (optional)
     timeout: 10000

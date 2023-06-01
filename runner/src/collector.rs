@@ -1,15 +1,18 @@
-use crate::config::{CollectorConfig, ConfigErrors};
 #[cfg(feature = "distributed")]
-use crate::distributed::mpi::MPICollector;
+use crate::distributed::{fs::PROCESSING_PREFIX, mpi::MPICollector};
+use crate::{
+    config::{CollectorConfig, ConfigErrors},
+    distributed::fs::WrappedPath,
+};
 use cowstr::CowStr;
 use globset::GlobBuilder;
 use ignore::{DirEntry, WalkBuilder};
 use itertools::Itertools;
-use once_cell::sync::Lazy;
 use std::{
     collections::BTreeMap,
     env,
     ffi::{OsStr, OsString},
+    ops::{Deref, DerefMut},
     os::unix::prelude::OsStrExt,
     path::PathBuf,
 };
@@ -40,14 +43,45 @@ pub enum Collector {
     MPI(MPICollector),
 }
 
+/// A wrapper value for path like values
+#[derive(Debug, Clone)]
+pub enum PathValue {
+    /// wrapped std PathBuf
+    Buf(PathBuf),
+    /// wrapped std::PathBuf with rename on drop
+    Wrapped(WrappedPath),
+}
+
+impl Deref for PathValue {
+    type Target = PathBuf;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Buf(pathbuf) => pathbuf,
+            Self::Wrapped(wrapped) => wrapped,
+        }
+    }
+}
+
+impl DerefMut for PathValue {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            Self::Buf(pathbuf) => pathbuf,
+            Self::Wrapped(ref mut wrapped) => wrapped,
+        }
+    }
+}
+
 /// primitve way to retrieve the tmp dir from the environment with defualt to /tmp
 fn get_tmp_dir() -> PathBuf {
     env::var("TMPDIR")
         .map(PathBuf::from)
         .unwrap_or(PathBuf::from("/tmp"))
 }
+
 impl<'a> Collector {
     pub fn load(config: &CollectorConfig) -> Result<Self, ConfigErrors> {
+        // TODO: Inject FS and MPI collector here
         match config {
             CollectorConfig::GDB { server, tmp_dir } => {
                 error!("The GDB isn't implemented yet, please use Glob instead");
@@ -129,7 +163,7 @@ impl<'a> Collector {
 }
 
 impl Iterator for Collector {
-    type Item = PathBuf;
+    type Item = PathValue;
 
     /// return accurate size for underlying iterator
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -143,14 +177,14 @@ impl Iterator for Collector {
                 (len, Some(len))
             }
             Self::FS { inner } => inner.size_hint(),
-            Self::MPI(collector) => todo!(),
+            Self::MPI(_collector) => todo!(),
         }
     }
 
     /// return next test form initial test load
     fn next(&mut self) -> Option<Self::Item> {
         match self {
-            Self::GDB { paths } | Self::Glob { paths } => paths.pop(),
+            Self::GDB { paths } | Self::Glob { paths } => paths.pop().map(PathValue::Buf),
             Self::Grouped { collectors } => {
                 for collector in collectors {
                     let next = collector.next();
@@ -164,44 +198,53 @@ impl Iterator for Collector {
             }
             Self::FS { inner } => {
                 while let Some(path) = inner.next() {
-                    if path.exists() {
-                        // clone path and create a copy with the processing prefix
-                        // this is quite convoluted to alow for not upcasting OsStrings
-                        let mut new_path = path.clone();
-                        let filename = new_path.file_name().unwrap_or(OsStr::new(""));
-                        let mut joined_filename =
-                            OsString::with_capacity(filename.len() + PROCESSING_PREFIX.len());
-                        joined_filename.push(PROCESSING_PREFIX.as_os_str());
-                        joined_filename.push(filename);
-                        new_path.set_file_name(&joined_filename);
+                    match path {
+                        PathValue::Wrapped { .. } => return Some(path),
+                        PathValue::Buf(path) => {
+                            if path.exists() {
+                                // clone path and create a copy with the processing prefix
+                                // this is quite convoluted to alow for not upcasting OsStrings
+                                let mut new_path = path.clone();
+                                let filename = new_path.file_name().unwrap_or(OsStr::new(""));
+                                let mut joined_filename = OsString::with_capacity(
+                                    filename.len() + PROCESSING_PREFIX.len(),
+                                );
+                                joined_filename.push(PROCESSING_PREFIX.as_os_str());
+                                joined_filename.push(filename);
+                                new_path.set_file_name(&joined_filename);
 
-                        let result = unsafe {
-                            // signature: rename(2), two *const char pointers
-                            nix::libc::rename(
-                                path.as_os_str().as_bytes().as_ptr() as *const i8,
-                                new_path.as_os_str().as_bytes().as_ptr() as *const i8,
-                            )
-                        };
-
-                        if result == 0 {
-                            return Some(path);
-                        } else if result == -1 {
-                            match nix::errno::errno() {
-                                nix::libc::ENOENT => {
-                                    debug!(
-                                        path = ?path,
-                                        "Skipped since it wasn't found between exist and mv"
+                                // we can take advantage of the fact that rename should (after
+                                // linux guidelines) be an atomic operation and as such should
+                                // survi
+                                let result = unsafe {
+                                    // signature: rename(2), two *const char pointers
+                                    nix::libc::rename(
+                                        path.as_os_str().as_bytes().as_ptr() as *const i8,
+                                        new_path.as_os_str().as_bytes().as_ptr() as *const i8,
                                     )
-                                }
-                                nix::libc::EACCES => {
-                                    warn!(path = ?path, "Failed to access due to permission error");
-                                }
-                                errno => {
-                                    error!(
-                                        path = ?path,
-                                        errno = errno,
-                                        "Failed to mv path for processing"
-                                    );
+                                };
+
+                                if result == 0 {
+                                    return Some(PathValue::Wrapped(WrappedPath::new(path)));
+                                } else {
+                                    match nix::errno::errno() {
+                                        nix::libc::ENOENT => {
+                                            debug!(
+                                                path = ?path,
+                                                "Skipped since it wasn't found between check and rename"
+                                            )
+                                        }
+                                        nix::libc::EACCES => {
+                                            warn!(path = ?path, "Failed to access due to permission error");
+                                        }
+                                        errno => {
+                                            error!(
+                                                path = ?path,
+                                                errno = errno,
+                                                "Failed to rename path for processing"
+                                            );
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -210,18 +253,7 @@ impl Iterator for Collector {
 
                 None
             }
-            Self::MPI(collector) => todo!(),
+            Self::MPI(_collector) => todo!(),
         }
     }
 }
-
-static PROCESSING_PREFIX: Lazy<OsString> = Lazy::new(|| {
-    let mut string = OsString::new();
-    string.push("[processing]_");
-    string
-});
-static DONE_PREFIX: Lazy<OsString> = Lazy::new(|| {
-    let mut string = OsString::new();
-    string.push("[done]_");
-    string
-});

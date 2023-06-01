@@ -2,6 +2,7 @@ use crate::{
     collector::{Collector, CollectorMap},
     config::{ExecutorConfig, SolverConfig},
     database::{ConnectionAdapter, ConnectionError, TestMetrics},
+    distributed::SynchronizationTypes,
     ingest::{IngestorError, IngestorMap, RunOutput},
 };
 use affinity::{get_core_num, set_thread_affinity};
@@ -100,7 +101,20 @@ impl<'a> LocalExecutor<'a> {
             }
 
             #[cfg(feature = "distributed")]
-            ExecutorConfig::Distributed { .. } => unreachable!(),
+            ExecutorConfig::Distributed { synchronization } => match synchronization {
+                SynchronizationTypes::Coordinated => {
+                    let span = span!(Level::INFO, "coordinated-init",);
+                    let _enter = span.enter();
+
+                    debug!("Initializing distributed environment.");
+                }
+                SynchronizationTypes::FileSystem { path } => {
+                    let span = span!(Level::INFO, "fs-init", path = ?path);
+                    let _enter = span.enter();
+
+                    debug!("Initializing distributed environment.");
+                }
+            },
         }
 
         // general counters to provide a progress bar

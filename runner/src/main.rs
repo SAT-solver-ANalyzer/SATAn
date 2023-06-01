@@ -6,12 +6,19 @@ mod ingest;
 
 #[cfg(feature = "distributed")]
 mod distributed;
+use cowstr::CowStr;
+#[cfg(feature = "distributed")]
+use distributed::SynchronizationTypes;
 
 use clap::{crate_name, crate_version, Args, Parser, Subcommand};
 use config::ConfigErrors;
+use itertools::Itertools;
+
 use std::{collections::BTreeMap, fs::File, io::BufReader, path::PathBuf, process::exit};
 use tracing::{debug, error, info};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+
+use crate::{collector::Collector, config::ExecutorConfig, distributed::mpi::MPICollector};
 
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
@@ -70,15 +77,9 @@ pub struct MergeArgs {
     databases: Vec<PathBuf>,
 }
 
-fn main() -> Result<(), ConfigErrors> {
-    // give a small info as a disclaimer for development progress
-    info!("{} {} - pre ALPHA", crate_name!(), crate_version!());
-
-    // parse the args with clap
-    let args = CLI::parse();
-
+fn setup_global_subscriber() {
     // Configure a custom event formatter and registry
-    tracing_subscriber::registry()
+    let registry = tracing_subscriber::registry()
         .with(
             EnvFilter::try_from_default_env()
                 .or_else(|_| EnvFilter::try_new("info"))
@@ -90,8 +91,35 @@ fn main() -> Result<(), ConfigErrors> {
                 .with_thread_ids(true)
                 .with_thread_names(false)
                 .compact(),
-        )
-        .init();
+        );
+
+    #[cfg(feature = "tracing")]
+    {
+        let tracer = match opentelemetry_jaeger::new_agent_pipeline()
+            .with_service_name("satan")
+            .install_simple()
+        {
+            Ok(tracer) => tracer,
+            Err(error) => {
+                error!(error = ?error, "Failed to connect jeager tracing backend: {error}");
+
+                exit(1);
+            }
+        };
+        let opentelemetry = tracing_opentelemetry::layer().with_tracer(tracer);
+        registry.with(opentelemetry).init();
+    }
+    #[cfg(not(feature = "tracing"))]
+    registry.init()
+}
+
+fn main() -> Result<(), ConfigErrors> {
+    // give a small info as a disclaimer for development progress
+    info!("{} {} - pre ALPHA", crate_name!(), crate_version!());
+
+    // parse the args with clap
+    let args = CLI::parse();
+    setup_global_subscriber();
 
     debug!("Args: {args:?}");
 
@@ -103,14 +131,14 @@ fn main() -> Result<(), ConfigErrors> {
                 match File::open(sub_args.config).map(BufReader::new) {
                     Ok(config_reader) => match serde_yaml::from_reader(config_reader) {
                         Ok(config) => config,
-                        Err(e) => {
-                            error!("Failed to deserialize config file: {e}");
+                        Err(error) => {
+                            error!(error = ?error, "Failed to deserialize config file: {error}");
 
                             exit(1);
                         }
                     },
-                    Err(e) => {
-                        error!("Couldn't open reader on config file: {e}");
+                    Err(error) => {
+                        error!(error = ?error, "Couldn't open reader on config file: {error}");
 
                         exit(1);
                     }
@@ -186,21 +214,78 @@ fn main() -> Result<(), ConfigErrors> {
                 }
             };
 
+            // TODO: Inject MPICollector and FS Collector
             let collectors = match config.collectors() {
-                Ok(collectors) => collectors,
+                Ok(collectors) => match config.executor {
+                    ExecutorConfig::Distributed {
+                        ref synchronization,
+                    } => {
+                        let mut new_collector_map = BTreeMap::new();
+                        match synchronization {
+                            SynchronizationTypes::Coordinated => {
+                                new_collector_map.insert(
+                                    CowStr::from("MPI"),
+                                    Collector::MPI(MPICollector::new(
+                                        collectors
+                                            .into_iter()
+                                            .map(|(_, acc)| acc)
+                                            .reduce(|acc, value| acc.join(value))
+                                            .unwrap(),
+                                    )),
+                                );
+                            }
+                            SynchronizationTypes::FileSystem { .. } => {
+                                new_collector_map.insert(
+                                    CowStr::from("FS"),
+                                    Collector::FS {
+                                        inner: Box::new(
+                                            collectors
+                                                .into_iter()
+                                                .map(|(_, acc)| acc)
+                                                .reduce(|acc, value| acc.join(value))
+                                                .unwrap(),
+                                        ),
+                                    },
+                                );
+                            }
+                        };
+
+                        new_collector_map
+                    }
+                    _ => collectors,
+                },
                 Err((name, error)) => {
-                    error!(error = ?error, "Failed to compile collector for {name}: {error}");
+                    error!(error = ?error, name = %name, "Failed to compile collector for {name}: {error}");
                     exit(1);
                 }
             };
 
-            // select an executor and throw the queue at it
-            match executors::LocalExecutor::load(connection, config, ingestors, collectors) {
+            // select an executor ...
+            let executor = match config.executor {
+                #[cfg(feature = "distributed")]
+                ExecutorConfig::Distributed {
+                    ref synchronization,
+                } => match synchronization {
+                    SynchronizationTypes::Coordinated => {
+                        // TODO: Hook into MPI coordinator
+                        todo!()
+                    }
+                    SynchronizationTypes::FileSystem { .. } => {
+                        executors::LocalExecutor::load(connection, config, ingestors, collectors)
+                    }
+                },
+                ExecutorConfig::Local { .. } => {
+                    executors::LocalExecutor::load(connection, config, ingestors, collectors)
+                }
+            };
+
+            // ... and throw the queue at it
+            match executor {
                 Ok(executor) => match executor.execute() {
                     Ok(()) => info!("Finished execution"),
                     Err(error) => error!(error = ?error, "Executor failed: {error}"),
                 },
-                Err(executor) => error!("Executor {executor} is not supported",),
+                Err(error) => error!(error = ?error, "Executor failed to initialize"),
             }
 
             Ok(())

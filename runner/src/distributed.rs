@@ -1,3 +1,4 @@
+pub mod fs;
 pub mod mpi;
 pub mod util;
 

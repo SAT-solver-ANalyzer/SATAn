@@ -45,6 +45,7 @@ In planning/ development is a distributed executor that builds on top of the loc
 !!! note
 
 	The distributed executor offers various strategies is currently in the planning phase.
+	It hooks into the storage and collector layer and doesn't just work on the executor layer.
 	The design and strategies below are proposals and I'm grateful for any feedback.
 
 The distributed executor is intended for clustered environments with, e.g., SLURM.
@@ -55,7 +56,7 @@ As such it offers the same advantages and limitations as the local executor on a
 
 Coordination of work should be possible in two ways:
 
-1. `flock` based coordination (`Locking`) that relies on the FS for reliable locking.
+1. filename-based coordination (`Locking`) that relies on the FS for reliable synchronization.
 2. (recommended) Coordination with a dedicated coordinator and communication over MPI (`Coordinated`)
 
 ??? note "Other coordination methods"
@@ -69,18 +70,20 @@ Coordination of work should be possible in two ways:
 !!! info "Requirements"
 
 	A shared, reliable file system, like [Lustre](https://www.lustre.org/) (with `-o flock` mount) or [BeeGFS](https://en.wikipedia.org/wiki/BeeGFS).
-	The `Locking` coordinator relies on file locks for synchronization.
+
+	The `Locking` coordinator relies on the `rename` being atomic and hostnames being unique across the cluster for synchronization.
 
 ???+ warning "Limitations"
 
 	The `Locking` coordinator relies on the FS and as such will have a rather high usage of metadata related syscalls.
 	This is proportional to the throughput of the executor but should be kept in mind when working with, e.g., Lustre to avoid overly straining the metadata servers in shared environments.
-	It shouldn't be a problem in low throughput scenarios.
+	It shouldn't be a problem in low throughput (above 10-50 ms per run) scenarios.
 
 	This coordinator doesn't allow scheduling of test iterations on multiple nodes.
 	You should check the node to node performance delta and account for it when doing analysis down the line.
 
 	Results are stored in a separate database file per node when SQLite or DuckDB.
+	This requires the cluster to have unique hostnames per node, like `bcn[1000-1500]`, this might be mitigaed later on as seen fit with, e.g. a random prefix.
 	These files can be merged by the runner `runner merge [filenames ...]` afterwards.
 
 	If any of the above problems are a potential problem consider the `Coordinated` coordinator.
@@ -90,8 +93,9 @@ The `Locking` coordinator represents the KISS approach to a distributed system w
 This approach should be used when there is no available MPI network between nodes.
 It also is tolerant to node failure with only the tests currently executed by the nodes being lost.
 
-The `Locking` coordinator works by deterministically collecting files and acquiring file locks (using `flock` on Linux) for each runner when a file should be executed.
-
+The `Locking` coordinator works by deterministically collecting files and locking files by renaming them.
+Specifically files being processed at the moment are renamed to `[processing]_{filename...}` and files that are done are renamed to `[done]_{filename...}`.
+The runner also offers the `clean-prefix` subcommand to remove all `[processing]_` and `[done]_` prefixes from tests.
 
 This file will then be copied into a temporary file and dispatched to the local executor.
 **After completion the original test file will be deleted**.

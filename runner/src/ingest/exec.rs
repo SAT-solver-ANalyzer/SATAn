@@ -26,9 +26,9 @@ impl<'a> ExecIngestor<'a> {
     pub fn load(config: &IngestorConfig) -> Result<Self, ConfigErrors> {
         match config {
             IngestorConfig::Exec(config) => Ok(Self {
-                ingestor: Cow::from(config.executable.as_os_str().to_owned()),
+                ingestor: Cow::from(config.executable.clone().as_os_str().to_owned()),
                 timeout: Duration::from_millis(config.timeout),
-                params: Cow::from(OsStr::new(config.params.as_str().clone()).to_owned()),
+                params: Cow::from(OsStr::new(config.params.clone().as_str()).to_owned()),
             }),
             _ => unreachable!(),
         }
