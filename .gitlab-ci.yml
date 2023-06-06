@@ -3,7 +3,7 @@ image: nixos/nix
 docs:test:
   stage: test
   script:
-    - nix develop .#docs -c mkdocs build --strict --verbose --site-dir test
+    - "nix --experimental-features 'nix-command flakes' develop .#docs -c mkdocs build --strict --verbose --site-dir test"
   artifacts:
     paths:
     - test
@@ -13,7 +13,7 @@ docs:test:
 docs:pages:
   stage: deploy
   script:
-    - nix develop .#docs -c mkdocs build --strict --verbose
+    - "nix --experimental-features 'nix-command flakes' develop .#docs -c mkdocs build --strict --verbose"
   artifacts:
     paths:
     - public
@@ -22,6 +22,6 @@ docs:pages:
 
 test:cargo:
   script:
-    - nix develop -c mold -run cargo t
+    - "nix --experimental-features 'nix-command flakes' develop -c mold -run cargo t"
   rules:
     - if: $CI_COMMIT_REF_NAME == $CI_DEFAULT_BRANCH
