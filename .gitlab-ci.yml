@@ -21,6 +21,7 @@ docs:pages:
     - if: $CI_COMMIT_REF_NAME == $CI_DEFAULT_BRANCH
 
 test:cargo:
+  stage: test
   script:
     - "nix --experimental-features 'nix-command flakes' develop -c mold -run cargo t"
   rules:
