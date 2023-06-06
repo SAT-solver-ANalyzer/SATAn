@@ -1,5 +1,5 @@
 use crate::{
-    collector::{Collector, CollectorMap},
+    collector::CollectorMap,
     config::{ExecutorConfig, SolverConfig},
     database::{ConnectionAdapter, ConnectionError, TestMetrics},
     distributed::SynchronizationTypes,

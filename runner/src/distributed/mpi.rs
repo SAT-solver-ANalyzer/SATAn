@@ -5,7 +5,7 @@ pub struct MPICoordinator {
     pub is_master: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MPICollector {
     inner: Box<Collector>,
 }

@@ -1,6 +1,8 @@
 pub mod fs;
 pub mod mpi;
 pub mod util;
+#[cfg(test)]
+mod util_test;
 
 /*
  * Plan for the slurm executor:

@@ -6,19 +6,29 @@ mod ingest;
 
 #[cfg(feature = "distributed")]
 mod distributed;
-use cowstr::CowStr;
 #[cfg(feature = "distributed")]
-use distributed::SynchronizationTypes;
+use distributed::{
+    fs::{DONE_PREFIX, PROCESSING_PREFIX},
+    SynchronizationTypes,
+};
+use tracing_unwrap::ResultExt;
 
+use crate::{
+    collector::Collector,
+    config::ExecutorConfig,
+    distributed::util::{rename, strip_prefix},
+};
 use clap::{crate_name, crate_version, Args, Parser, Subcommand};
 use config::ConfigErrors;
-use itertools::Itertools;
-
-use std::{collections::BTreeMap, fs::File, io::BufReader, path::PathBuf, process::exit};
+use std::{
+    collections::BTreeMap,
+    ffi::{OsStr, OsString},
+    os::unix::prelude::OsStrExt,
+    path::PathBuf,
+    process::exit,
+};
 use tracing::{debug, error, info};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
-
-use crate::{collector::Collector, config::ExecutorConfig, distributed::mpi::MPICollector};
 
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
@@ -26,6 +36,24 @@ use crate::{collector::Collector, config::ExecutorConfig, distributed::mpi::MPIC
 struct CLI {
     #[arg(short = 'b', long = "benchmark", help = "benchmark to continue")]
     benchmark: Option<i32>,
+
+    #[arg(
+        short = 'c',
+        long = "config",
+        value_name = "CONFIG",
+        value_hint = clap::ValueHint::FilePath,
+        help = "Path to the config file",
+        default_value = "solvers.yml",
+        )]
+    config: PathBuf,
+
+    #[cfg(feature = "tracing")]
+    #[arg(
+        short = 't',
+        long = "opentelemetry",
+        help = "Enable opentelemetry tracing subscriber"
+    )]
+    opentelemetry: bool,
 
     #[command(subcommand)]
     command: Commands,
@@ -35,20 +63,14 @@ struct CLI {
 enum Commands {
     /// Merge multiple SATAn runner metric databases
     Merge(MergeArgs),
+    /// Removeall processing and done prefixes from test files
+    Clean,
     /// Execute a benchmark suite
     Execute(ExecuteArgs),
 }
 
 #[derive(Clone, Debug, Args)]
 pub struct ExecuteArgs {
-    #[arg(
-        short = 'c',
-        long = "config",
-        value_name = "CONFIG",
-        value_hint = clap::ValueHint::FilePath,
-        help = "Path to the config file"
-        )]
-    config: PathBuf,
     #[arg(
         long = "comment",
         value_name = "COMMENT",
@@ -77,7 +99,7 @@ pub struct MergeArgs {
     databases: Vec<PathBuf>,
 }
 
-fn setup_global_subscriber() {
+fn setup_global_subscriber(cli: &CLI) {
     // Configure a custom event formatter and registry
     let registry = tracing_subscriber::registry()
         .with(
@@ -106,8 +128,13 @@ fn setup_global_subscriber() {
                 exit(1);
             }
         };
-        let opentelemetry = tracing_opentelemetry::layer().with_tracer(tracer);
-        registry.with(opentelemetry).init();
+
+        if cli.opentelemetry {
+            let opentelemetry = tracing_opentelemetry::layer().with_tracer(tracer);
+            registry.with(opentelemetry).init();
+        } else {
+            registry.init();
+        }
     }
     #[cfg(not(feature = "tracing"))]
     registry.init()
@@ -119,40 +146,76 @@ fn main() -> Result<(), ConfigErrors> {
 
     // parse the args with clap
     let args = CLI::parse();
-    setup_global_subscriber();
+    setup_global_subscriber(&args);
 
     debug!("Args: {args:?}");
 
     match args.command {
         Commands::Merge { .. } => todo!(),
-        Commands::Execute(sub_args) => {
+        Commands::Clean => {
             // determine if the solver follows the correct syntax, exists ...
-            let mut config: config::SolverConfig = if sub_args.config.is_file() {
-                match File::open(sub_args.config).map(BufReader::new) {
-                    Ok(config_reader) => match serde_yaml::from_reader(config_reader) {
-                        Ok(config) => config,
-                        Err(error) => {
-                            error!(error = ?error, "Failed to deserialize config file: {error}");
+            let mut config: config::SolverConfig = config::SolverConfig::load(&args.config);
 
-                            exit(1);
-                        }
-                    },
-                    Err(error) => {
-                        error!(error = ?error, "Couldn't open reader on config file: {error}");
-
-                        exit(1);
-                    }
-                }
-            } else {
-                error!(
-                    "{} is not a file or doesn't exist, please provide an existing config file",
-                    sub_args.config.to_string_lossy()
-                );
+            // Check semantic structure (solver references, etc.)
+            if config.preflight_checks() {
+                error!("Config contains one or more errors, see previous error messages");
 
                 exit(1);
+            }
+
+            let collectors = match config.collectors() {
+                Ok(collectors) => collectors,
+                Err((name, error)) => {
+                    error!(error = ?error, name = %name, "Failed to compile collector for {name}: {error}");
+                    exit(1);
+                }
             };
 
-            // pre filte config solvers and test sets
+            collectors.into_iter().for_each(|(name, collector)| {
+                info!(name = %name, "Handling new collector");
+
+                // iterate over files, match on file_name prefix
+                for file in collector {
+                    if let Some(file_name) = file.file_name().map(OsStr::to_os_string) {
+                        if file_name.len() > DONE_PREFIX.len()
+                            && file_name.as_bytes()[..DONE_PREFIX.len()] == *DONE_PREFIX.as_bytes()
+                        {
+                            info!(file_name = ?file_name, "Rename filename");
+
+                            let mut new_file_name =
+                                OsString::with_capacity(file_name.len() - DONE_PREFIX.len());
+                            new_file_name =
+                                strip_prefix(file_name, DONE_PREFIX.clone(), new_file_name);
+                            let mut new_file_path = file.clone().to_path_buf();
+                            new_file_path.set_file_name(new_file_name);
+
+                            rename(&file, &new_file_path).unwrap_or_log();
+                        } else if file_name.len() > PROCESSING_PREFIX.len()
+                            && file_name.as_bytes()[..PROCESSING_PREFIX.len()]
+                                == *PROCESSING_PREFIX.as_bytes()
+                        {
+                            info!(file_name = ?file_name, "Rename filename");
+
+                            let mut new_file_name =
+                                OsString::with_capacity(file_name.len() - PROCESSING_PREFIX.len());
+                            new_file_name =
+                                strip_prefix(file_name, PROCESSING_PREFIX.clone(), new_file_name);
+                            let mut new_file_path = file.clone().to_path_buf();
+                            new_file_path.set_file_name(new_file_name);
+
+                            rename(&file, &new_file_path).unwrap_or_log();
+                        }
+                    }
+                }
+            });
+
+            Ok(())
+        }
+        Commands::Execute(sub_args) => {
+            // determine if the solver follows the correct syntax, exists ...
+            let mut config: config::SolverConfig = config::SolverConfig::load(&args.config);
+
+            // pre filter config solvers and test sets
             if let Some(solvers) = sub_args.solvers {
                 config.solvers = config
                     .solvers
@@ -216,41 +279,25 @@ fn main() -> Result<(), ConfigErrors> {
 
             // TODO: Inject MPICollector and FS Collector
             let collectors = match config.collectors() {
-                Ok(collectors) => match config.executor {
+                Ok(mut collectors) => match config.executor {
                     ExecutorConfig::Distributed {
                         ref synchronization,
                     } => {
-                        let mut new_collector_map = BTreeMap::new();
                         match synchronization {
                             SynchronizationTypes::Coordinated => {
-                                new_collector_map.insert(
-                                    CowStr::from("MPI"),
-                                    Collector::MPI(MPICollector::new(
-                                        collectors
-                                            .into_iter()
-                                            .map(|(_, acc)| acc)
-                                            .reduce(|acc, value| acc.join(value))
-                                            .unwrap(),
-                                    )),
-                                );
+                                // TODO: Create coordinator here and share across collectors
+                                collectors.iter_mut().for_each(|(_, value)| {
+                                    *value = Collector::mpi(value.clone());
+                                });
                             }
                             SynchronizationTypes::FileSystem { .. } => {
-                                new_collector_map.insert(
-                                    CowStr::from("FS"),
-                                    Collector::FS {
-                                        inner: Box::new(
-                                            collectors
-                                                .into_iter()
-                                                .map(|(_, acc)| acc)
-                                                .reduce(|acc, value| acc.join(value))
-                                                .unwrap(),
-                                        ),
-                                    },
-                                );
+                                collectors.iter_mut().for_each(|(_, value)| {
+                                    *value = Collector::fs(value.clone());
+                                });
                             }
                         };
 
-                        new_collector_map
+                        collectors
                     }
                     _ => collectors,
                 },
@@ -261,23 +308,22 @@ fn main() -> Result<(), ConfigErrors> {
             };
 
             // select an executor ...
+            #[cfg(feature = "distributed")]
             let executor = match config.executor {
-                #[cfg(feature = "distributed")]
                 ExecutorConfig::Distributed {
-                    ref synchronization,
-                } => match synchronization {
-                    SynchronizationTypes::Coordinated => {
-                        // TODO: Hook into MPI coordinator
-                        todo!()
-                    }
-                    SynchronizationTypes::FileSystem { .. } => {
-                        executors::LocalExecutor::load(connection, config, ingestors, collectors)
-                    }
-                },
-                ExecutorConfig::Local { .. } => {
+                    synchronization: SynchronizationTypes::Coordinated,
+                } => todo!(),
+                ExecutorConfig::Distributed {
+                    synchronization: SynchronizationTypes::FileSystem { .. },
+                }
+                | ExecutorConfig::Local { .. } => {
                     executors::LocalExecutor::load(connection, config, ingestors, collectors)
                 }
             };
+
+            #[cfg(not(feature = "distributed"))]
+            let executor =
+                executors::LocalExecutor::load(connection, config, ingestors, collectors);
 
             // ... and throw the queue at it
             match executor {

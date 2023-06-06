@@ -9,7 +9,14 @@ use crate::{
 use cowstr::CowStr;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, fs::File, io::Error, os::unix::fs::MetadataExt, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    fs::File,
+    io::{BufReader, Error},
+    os::unix::fs::MetadataExt,
+    path::PathBuf,
+    process::exit,
+};
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
@@ -216,6 +223,34 @@ impl TestSet {
 }
 
 impl SolverConfig {
+    /// load config or exit -- this is non-graceful and only intended for use in main.rs
+    pub fn load(path: &PathBuf) -> Self {
+        if path.is_file() {
+            match File::open(path).map(BufReader::new) {
+                Ok(config_reader) => match serde_yaml::from_reader(config_reader) {
+                    Ok(config) => config,
+                    Err(error) => {
+                        error!(error = ?error, "Failed to deserialize config file: {error}");
+
+                        exit(1);
+                    }
+                },
+                Err(error) => {
+                    error!(error = ?error, "Couldn't open reader on config file: {error}");
+
+                    exit(1);
+                }
+            }
+        } else {
+            error!(
+                "{} is not a file or doesn't exist, please provide an existing config file",
+                path.to_string_lossy()
+            );
+
+            exit(1);
+        }
+    }
+
     /// load, if possible, all ingestors
     pub fn load_ingestors(&self) -> Result<IngestorMap, ConfigErrors> {
         let mut ingestors = IngestorMap::new();

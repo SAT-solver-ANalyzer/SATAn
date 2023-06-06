@@ -1,4 +1,6 @@
 site_name: SATAn Docs 
+site_dir: public
+site_url: https://satan.arasaka.space/satan
 
 theme:
   name: material

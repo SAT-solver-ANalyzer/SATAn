@@ -1,0 +1,32 @@
+executor: !Distributed
+  synchronization: !FileSystem
+    path: /tmp
+
+database:
+  delayed: true
+  connection: !SQLite
+    path: satan.db
+
+ingest:
+  cadical: !Exec
+    timeout: 2000
+    executable:  ./solvers/test_cadical.sh
+  minisat: !Exec
+    timeout: 2000
+    executable:  ./solvers/test_minisat.sh
+
+tests:
+  cadical-tests:
+    collector: !Glob
+      path: ./solvers/cadical/test/cnf
+      glob: "*.cnf"
+    timeout: 1000
+    iterations: 100
+
+solvers:
+  cadical:
+    exec: ./test_cadical.sh
+    ingest: cadical
+  minisat:
+    exec: ./test_minisat.sh
+    ingest: minisat

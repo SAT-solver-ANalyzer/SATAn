@@ -1,27 +1,24 @@
-use super::util::rename;
+use super::util::{rename, reprefix};
 use once_cell::sync::Lazy;
 use std::{
-    ffi::{OsStr, OsString},
+    ffi::OsString,
     ops::{Deref, DerefMut},
-    os::unix::prelude::OsStrExt,
     path::PathBuf,
 };
 use tracing::{debug, error};
 
 #[derive(Debug, Clone)]
+/// A path that will rename the underlying object from PROCESSING_PREFIX to DONE_PREFIX when
+/// dropped
 pub struct WrappedPath {
     path: PathBuf,
 }
 
 impl Drop for WrappedPath {
     fn drop(&mut self) {
+        // This is buggy, I think
         let file_name = self.path.file_name().unwrap().to_os_string();
-        let mut done_file_name = DONE_PREFIX.clone();
-        // append old, original file name to the DONE_PREFIX
-        // We have to jump around types a bit since indexing is messy with OsStr types
-        done_file_name.push(OsStr::from_bytes(
-            &file_name.as_bytes()[PROCESSING_PREFIX.len()..],
-        ));
+        let done_file_name = reprefix(&file_name, &PROCESSING_PREFIX, DONE_PREFIX.clone());
 
         let mut done_file_path = self.path.clone();
         done_file_path.set_file_name(done_file_name);

@@ -20,4 +20,10 @@ It should cover the full benchmark cycle from:
 
 In collaboration with and initiated by Benjamin Kaiser and Robert Clausecker.
 
+## Software documentation
+
+- [Internal architecture](./architecture.md)
+  - [Runtime execution flow](./runtime.md)
+- [Debugging](./debugging.md)
+
 Developed by Joshua Kobschätzki (Cobalt).
