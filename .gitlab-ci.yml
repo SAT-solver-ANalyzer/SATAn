@@ -10,7 +10,7 @@ docs:test:
   rules:
     - if: $CI_COMMIT_REF_NAME != $CI_DEFAULT_BRANCH
 
-docs:pages:
+pages:
   stage: deploy
   script:
     - "nix --experimental-features 'nix-command flakes' develop .#docs -c mkdocs build --strict --verbose"
